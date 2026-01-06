@@ -64,6 +64,7 @@ inline void accumulate_hacc(
     int32_t* accu_res,
     size_t dim
 ) {
+#if defined(__AVX512F__)
     __m512i low_mask = _mm512_set1_epi8(0xf);
     __m512i accu[2][4];
 
@@ -142,5 +143,10 @@ inline void accumulate_hacc(
 
     _mm512_storeu_epi32(accu_res, res[0]);
     _mm512_storeu_epi32(accu_res + 16, res[1]);
+#else
+// TODO(tamim): implement for AVX2
+    std::cerr << "At least requried AVX512F for using fastscan\n";
+    exit(1);
+#endif
 }
 }  // namespace rabitqlib::fastscan
