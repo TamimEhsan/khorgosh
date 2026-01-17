@@ -269,16 +269,60 @@ inline PID exact_nn(
 }
 
 namespace excode_ipimpl {
+
+#if defined(__AVX2__)
+// helper function for AVX2 inner product
+inline void contribute_ip(__m128i vec, const float* __restrict__ query, __m256 &sum) {
+/* // Equivalent AVX512 code:
+    __m512 q = _mm512_loadu_ps(&query[i]);
+    __m512 cf = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_00_to_15));
+    sum = _mm512_fmadd_ps(q, cf, sum);
+*/
+    __m256 q = _mm256_loadu_ps(query);
+    __m256 cf = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(vec));
+    sum = _mm256_fmadd_ps(q, cf, sum);
+
+    q = _mm256_loadu_ps(query+8);
+    cf = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128(vec, 8)));
+    sum = _mm256_fmadd_ps(q, cf, sum);
+};
+
+inline void contribute_ip_signed(__m128i vec, const float* __restrict__ query, __m256 &sum) {
+/* // Equivalent AVX512 code:
+    __m512 q = _mm512_loadu_ps(&query[i]);        
+    __m512 cf = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(c8));
+    sum = _mm512_fmadd_ps(cf, q, sum);
+*/
+    __m256 q = _mm256_loadu_ps(query);
+    __m256 cf = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(vec));
+    sum = _mm256_fmadd_ps(cf, q, sum);
+
+    q = _mm256_loadu_ps(query+8);
+    cf = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(vec, 8)));
+    sum = _mm256_fmadd_ps(cf, q, sum);
+};
+
+inline float _mm256_reduce_add_ps(__m256 v) {
+    float accumulator[8];
+    _mm256_storeu_ps(accumulator, v);
+    float result = 0.0f;
+    for (int i = 0; i < 8; ++i) {
+        result += accumulator[i];
+    }
+    return result;
+}
+#endif
+
 // ip16: this function is used to compute inner product of
 // vectors padded to multiple of 16
 // fxu1: the inner product is computed between float and 1-bit unsigned int (lay out can be
 // found rabitq_impl.hpp)
 // avx512: only applicable for avx512
-#if defined(__AVX512F__)
-inline float ip16_fxu1_avx512(
+inline float ip16_fxu1_avx(
     const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
 ) {
     float result = 0;
+#if defined(__AVX512F__)
     __m512 sum = _mm512_setzero_ps();
 
     for (size_t i = 0; i < dim; i += 16) {
@@ -291,15 +335,42 @@ inline float ip16_fxu1_avx512(
         query += 16;
     }
     result = _mm512_reduce_add_ps(sum);
+#elif defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+
+    const __m256i bitmask = _mm256_setr_epi32(
+        1, 2, 4, 8, 16, 32, 64, 128
+    );
+
+    for (size_t i = 0; i < dim; i += 8) {
+        __m256 q = _mm256_loadu_ps(query);
+        
+        __m256i byte_v = _mm256_set1_epi32(*compact_code);
+        __m256i isolated = _mm256_and_si256(byte_v, bitmask);
+        __m256i mask = _mm256_cmpeq_epi32(isolated, bitmask);
+        __m256 masked = _mm256_and_ps(q, _mm256_castsi256_ps(mask));
+        
+        sum = _mm256_add_ps(sum, masked);
+        query += 8;
+        ++compact_code;
+    }
+    result = _mm256_reduce_add_ps(sum);
+#endif
     return result;
 }
 
-inline float ip16_fxu2_avx512(
+inline float ip16_fxu2_avx(
     const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
 ) {
+#if defined(__AVX512F__)
     __m512 sum = _mm512_setzero_ps();
+#elif defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+#else
+    std::cerr << "AVX2 or AVX512 is required for excode ip functions\n";
+    exit(1);
+#endif
     float result = 0;
-
     const __m128i mask = _mm_set1_epi8(0b00000011);
 
     for (size_t i = 0; i < dim; i += 16) {
@@ -307,23 +378,37 @@ inline float ip16_fxu2_avx512(
 
         __m128i code = _mm_set_epi32(compact >> 6, compact >> 4, compact >> 2, compact);
         code = _mm_and_si128(code, mask);
-
+#if defined(__AVX512F__)
         __m512 cf = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(code));
-
         __m512 q = _mm512_loadu_ps(&query[i]);
         sum = _mm512_fmadd_ps(cf, q, sum);
-
+#elif defined(__AVX2__)
+        contribute_ip_signed(code, &query[i], sum);
+#endif
         compact_code += 4;
     }
+
+#if defined(__AVX512F__)
     result = _mm512_reduce_add_ps(sum);
+#elif defined(__AVX2__)
+    result = _mm256_reduce_add_ps(sum);
+#endif
     return result;
 }
 
-inline float ip64_fxu3_avx512(
+inline float ip64_fxu3_avx(
     const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
 ) {
-    __m512 sum = _mm512_setzero_ps();
 
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+#elif defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+#else 
+    std::cerr << "AVX2 or AVX512 is required for excode ip functions\n";
+    exit(1);
+#endif
+    float result = 0;
     const __m128i mask = _mm_set1_epi8(0b11);
     const __m128i top_mask = _mm_set1_epi8(0b100);
 
@@ -352,7 +437,7 @@ inline float ip64_fxu3_avx512(
         vec_16_to_31 = _mm_or_si128(top_16_to_31, vec_16_to_31);
         vec_32_to_47 = _mm_or_si128(top_32_to_47, vec_32_to_47);
         vec_48_to_63 = _mm_or_si128(top_48_to_63, vec_48_to_63);
-
+#if defined(__AVX512F__)
         __m512 q;
         __m512 cf;
 
@@ -371,37 +456,73 @@ inline float ip64_fxu3_avx512(
         q = _mm512_loadu_ps(&query[i + 48]);
         cf = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_48_to_63));
         sum = _mm512_fmadd_ps(q, cf, sum);
+#elif defined(__AVX2__)
+        contribute_ip(vec_00_to_15, &query[i], sum);
+        contribute_ip(vec_16_to_31, &query[i + 16], sum);
+        contribute_ip(vec_32_to_47, &query[i + 32], sum);
+        contribute_ip(vec_48_to_63, &query[i + 48], sum);
+#endif
     }
 
-    return _mm512_reduce_add_ps(sum);
+#if defined(__AVX512F__)
+    result = _mm512_reduce_add_ps(sum);
+#elif defined(__AVX2__)
+    result = _mm256_reduce_add_ps(sum);
+#endif
+    return result;
 }
 
-inline float ip16_fxu4_avx512(
+
+inline float ip16_fxu4_avx(
     const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
 ) {
-    constexpr int64_t kMask = 0x0f0f0f0f0f0f0f0f;
+#if defined(__AVX512F__)
     __m512 sum = _mm512_setzero_ps();
+#elif defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+#else
+    std::cerr << "AVX2 or AVX512 is required for excode ip functions\n";
+    exit(1);
+#endif
+    float result = 0.0f;
+    constexpr int64_t kMask = 0x0f0f0f0f0f0f0f0f;
     for (size_t i = 0; i < dim; i += 16) {
         int64_t compact = *reinterpret_cast<const int64_t*>(compact_code);
         int64_t code0 = compact & kMask;
         int64_t code1 = (compact >> 4) & kMask;
 
         __m128i c8 = _mm_set_epi64x(code1, code0);
+#if defined(__AVX512F__)
+        __m512 q = _mm512_loadu_ps(&query[i]);        
         __m512 cf = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(c8));
-
-        __m512 q = _mm512_loadu_ps(&query[i]);
         sum = _mm512_fmadd_ps(cf, q, sum);
-
+#elif defined(__AVX2__)
+        contribute_ip_signed(c8, &query[i], sum);
+#endif
         compact_code += 8;
     }
-    return _mm512_reduce_add_ps(sum);
+#if defined(__AVX512F__)
+    result = _mm512_reduce_add_ps(sum);
+#elif defined(__AVX2__)
+    result = _mm256_reduce_add_ps(sum); 
+#endif
+    return result;
 }
 
-inline float ip64_fxu5_avx512(
+
+inline float ip64_fxu5_avx(
     const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
 ) {
+#if defined(__AVX512F__)
     __m512 sum = _mm512_setzero_ps();
+#elif defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+#else
+    std::cerr << "AVX2 or AVX512 is required for excode ip functions\n";
+    exit(1);
+#endif
 
+    float result = 0.0f;
     const __m128i mask = _mm_set1_epi8(0b1111);
     const __m128i top_mask = _mm_set1_epi8(0b10000);
 
@@ -434,6 +555,7 @@ inline float ip64_fxu5_avx512(
         vec_32_to_47 = _mm_or_si128(top_32_to_47, vec_32_to_47);
         vec_48_to_63 = _mm_or_si128(top_48_to_63, vec_48_to_63);
 
+#if defined(__AVX512F__)
         __m512 q;
         __m512 cf;
 
@@ -452,16 +574,35 @@ inline float ip64_fxu5_avx512(
         q = _mm512_loadu_ps(&query[i + 48]);
         cf = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_48_to_63));
         sum = _mm512_fmadd_ps(q, cf, sum);
+#elif defined(__AVX2__)
+        contribute_ip(vec_00_to_15, &query[i], sum);
+        contribute_ip(vec_16_to_31, &query[i + 16], sum);
+        contribute_ip(vec_32_to_47, &query[i + 32], sum);
+        contribute_ip(vec_48_to_63, &query[i + 48], sum);
+#endif
     }
-
-    return _mm512_reduce_add_ps(sum);
+#if defined(__AVX512F__)
+    result = _mm512_reduce_add_ps(sum);
+#elif defined(__AVX2__)
+    result = _mm256_reduce_add_ps(sum);
+#endif
+    return result;
 }
 
-inline float ip16_fxu6_avx512(
+inline float ip16_fxu6_avx(
     const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
 ) {
-    constexpr int64_t kMask4 = 0x0f0f0f0f0f0f0f0f;
+#if defined(__AVX512F__)
     __m512 sum = _mm512_setzero_ps();
+#elif defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+#else
+    std::cerr << "AVX2 or AVX512 is required for excode ip functions\n";
+    exit(1);
+#endif
+    float result = 0.0f;
+    constexpr int64_t kMask4 = 0x0f0f0f0f0f0f0f0f;
+    
     const __m128i mask2 = _mm_set1_epi8(0b00110000);
 
     for (size_t i = 0; i < dim; i += 16) {
@@ -479,21 +620,37 @@ inline float ip16_fxu6_avx512(
 
         __m128i c6 = _mm_or_si128(c2, c4);
 
+#if defined(__AVX512F__)
         __m512 cf = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(c6));
 
         __m512 q = _mm512_loadu_ps(&query[i]);
         sum = _mm512_fmadd_ps(cf, q, sum);
-
+#elif defined(__AVX2__)
+        contribute_ip_signed(c6, &query[i], sum);
+#endif
         compact_code += 4;
     }
-    return _mm512_reduce_add_ps(sum);
+#if defined(__AVX512F__)
+    result = _mm512_reduce_add_ps(sum);
+#elif defined(__AVX2__)
+    result = _mm256_reduce_add_ps(sum);
+#endif
+    return result;
 }
 
-inline float ip64_fxu7_avx512(
+inline float ip64_fxu7_avx(
     const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
 ) {
+#if defined(__AVX512F__)
     __m512 sum = _mm512_setzero_ps();
+#elif defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+#else
+    std::cerr << "AVX2 or AVX512 is required for excode ip functions\n";
+    exit(1);
+#endif
 
+    float result = 0.0f;
     const __m128i mask6 = _mm_set1_epi8(0b00111111);
     const __m128i mask2 = _mm_set1_epi8(0b11000000);
     const __m128i top_mask = _mm_set1_epi8(0b1000000);
@@ -532,6 +689,7 @@ inline float ip64_fxu7_avx512(
         vec_32_to_47 = _mm_or_si128(top_32_to_47, vec_32_to_47);
         vec_48_to_63 = _mm_or_si128(top_48_to_63, vec_48_to_63);
 
+#if defined(__AVX512F__)
         __m512 q;
         __m512 cf;
 
@@ -550,12 +708,22 @@ inline float ip64_fxu7_avx512(
         q = _mm512_loadu_ps(&query[i + 48]);
         cf = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(vec_48_to_63));
         sum = _mm512_fmadd_ps(q, cf, sum);
+#elif defined(__AVX2__)
+        contribute_ip(vec_00_to_15, &query[i], sum);
+        contribute_ip(vec_16_to_31, &query[i + 16], sum);
+        contribute_ip(vec_32_to_47, &query[i + 32], sum);
+        contribute_ip(vec_48_to_63, &query[i + 48], sum);
+#endif
     }
 
-    return _mm512_reduce_add_ps(sum);
-}
-// TODO(tamim): implement for AVX2
+#if defined(__AVX512F__)
+    result = _mm512_reduce_add_ps(sum);
+#elif defined(__AVX2__)
+    result = _mm256_reduce_add_ps(sum);
 #endif
+    return result;
+}
+
 
 // inner product between float type and int type vectors
 template <typename TF, typename TI>
@@ -572,28 +740,28 @@ inline TF ip_fxi(const TF* __restrict__ vec0, const TI* __restrict__ vec1, size_
 using ex_ipfunc = float (*)(const float*, const uint8_t*, size_t);
 
 inline ex_ipfunc select_excode_ipfunc(size_t ex_bits) {
-#if defined(__AVX512F__)
+
     if (ex_bits <= 1) {
         // when ex_bits = 0, we do not use it
-        return excode_ipimpl::ip16_fxu1_avx512;
+        return excode_ipimpl::ip16_fxu1_avx;
     }
     if (ex_bits == 2) {
-        return excode_ipimpl::ip16_fxu2_avx512;
+        return excode_ipimpl::ip16_fxu2_avx;
     }
     if (ex_bits == 3) {
-        return excode_ipimpl::ip64_fxu3_avx512;
+        return excode_ipimpl::ip64_fxu3_avx;
     }
     if (ex_bits == 4) {
-        return excode_ipimpl::ip16_fxu4_avx512;
+        return excode_ipimpl::ip16_fxu4_avx;
     }
     if (ex_bits == 5) {
-        return excode_ipimpl::ip64_fxu5_avx512;
+        return excode_ipimpl::ip64_fxu5_avx;
     }
     if (ex_bits == 6) {
-        return excode_ipimpl::ip16_fxu6_avx512;
+        return excode_ipimpl::ip16_fxu6_avx;
     }
     if (ex_bits == 7) {
-        return excode_ipimpl::ip64_fxu7_avx512;
+        return excode_ipimpl::ip64_fxu7_avx;
     }
     if (ex_bits == 8) {
         return excode_ipimpl::ip_fxi;
@@ -601,11 +769,7 @@ inline ex_ipfunc select_excode_ipfunc(size_t ex_bits) {
 
     std::cerr << "Bad IP function for IVF\n";
     exit(1);
-#else
-// TODO(tamim): implement for AVX2
-    std::cerr << "AVX512 is required for excode ip functions\n";
-    exit(1);
-#endif
+
 }
 
 static inline uint32_t reverse_bits(uint32_t n) {

@@ -7,7 +7,7 @@
 
 // Helper: AVX2 64-bit Popcount; Mula's method
 inline __m256i popcount_avx2(__m256i v) {
-#if defined(__AVX512F__)
+#if defined(__AVX2__)
     // Lookup table for population count of 0-15
     const __m256i lookup = _mm256_setr_epi8(
         0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
@@ -29,7 +29,7 @@ inline __m256i popcount_avx2(__m256i v) {
     // Sum bytes horizontally into 64-bit integers (SAD against 0)
     return _mm256_sad_epu8(cnt_bytes, _mm256_setzero_si256());
 #else
-    std::cerr << "AVX512 is required for popcount_avx2\n";
+    std::cerr << "AVX2 is required for popcount_avx2\n";
     exit(1);
 #endif
 }
