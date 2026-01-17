@@ -380,7 +380,3 @@ Rotator<T>* choose_rotator(
     exit(1);
 }
 }  // namespace rabitqlib
-
-int add(int a, int b) {
-    return a + b;
-}
