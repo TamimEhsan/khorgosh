@@ -293,7 +293,7 @@ class HierarchicalNSW {
         std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
     ) const;
 
-    maxheap<std::pair<float, PID>> search_knn(const float*, size_t);
+    void search_knn(const float*, size_t, buffer::SearchBuffer<float>&);
 
     void searchBaseLayerST_AdaptiveRerankOpt(
         PID ep_id,
@@ -302,7 +302,7 @@ class HierarchicalNSW {
         SplitSingleQuery<float>& query_wrapper,
         std::vector<float>& q_to_centroids,  // preprocess
         const float* query,
-        BoundedKNN& boundedKNN
+        buffer::SearchBuffer<float>& candidate_set
     );
 
     // Construction
@@ -1074,23 +1074,29 @@ inline std::vector<std::vector<std::pair<float, PID>>> HierarchicalNSW::search(
         [&](size_t idx, size_t /*threadId*/) {
             std::vector<float> rotated_query(padded_dim_);
             this->rotator_->rotate(queries + (idx * dim_), rotated_query.data());
-            maxheap<std::pair<float, PID>> knn = search_knn(rotated_query.data(), TOPK);
-            while (knn.size()) {
-                results[idx].emplace_back(knn.top());
-                knn.pop();
+            buffer::SearchBuffer<float> candidate_set(std::max(ef_, TOPK));
+            search_knn(rotated_query.data(), TOPK, candidate_set);
+
+            for(int i = 0; i < TOPK; i++) {
+                auto candidate = candidate_set.data()[i];
+
+                results[idx].emplace_back(candidate.distance, get_external_label(candidate.id & 0x7FFFFFFF));
             }
-            std::reverse(results[idx].begin(), results[idx].end());
+            // while (knn.size()) {
+            //     results[idx].emplace_back(knn.top());
+            //     knn.pop();
+            // }
+            // std::reverse(results[idx].begin(), results[idx].end());
         }
     );
     return results;
 }
 
-inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn(
-    const float* rotated_query, size_t TOPK
+inline void HierarchicalNSW::search_knn(
+    const float* rotated_query, size_t TOPK, buffer::SearchBuffer<float>& candidate_set
 ) {
-    maxheap<std::pair<float, PID>> result;
     if (cur_element_count_ == 0) {
-        return result;
+        return;
     }
 
     SplitSingleQuery<float> query_wrapper(
@@ -1158,7 +1164,6 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn(
         }
     }
 
-    BoundedKNN boundedKnn(TOPK);
     searchBaseLayerST_AdaptiveRerankOpt(
         curr_obj,
         std::max(ef_, TOPK),
@@ -1166,12 +1171,8 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn(
         query_wrapper,
         q_to_centroids,
         rotated_query,
-        boundedKnn
+        candidate_set
     );
-    for (auto& candidate : boundedKnn.candidates()) {
-        result.emplace(candidate.record.est_dist, get_external_label(candidate.id));
-    }
-    return result;
 }
 
 struct EstimateRecord {
@@ -1187,14 +1188,10 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
     SplitSingleQuery<float>& query_wrapper,
     std::vector<float>& q_to_centroids,  // preprocess
     [[maybe_unused]] const float* query,
-    BoundedKNN& boundedKNN
+    buffer::SearchBuffer<float>& candidate_set
 ) {
+    // std::cout << "Entering optimized search function with ef=" << ef << " and TOPK=" << TOPK << "\n";
     HashBasedBooleanSet* vl = visited_list_pool_->get_free_vislist();
-
-    // Use our bounded priority queue instead of the maxheap.
-    buffer::SearchBuffer<float> candidate_set(ef);
-
-    float distk = 1e10;
 
     EstimateRecord start_estimate_record;
     get_full_est(q_to_centroids, query_wrapper, ep_id, start_estimate_record);
@@ -1202,14 +1199,15 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
     float low_dist = start_estimate_record.low_dist;
 
     // Insert initial candidate.
-    boundedKNN.insert({ResultRecord(est_dist, low_dist), ep_id});
     candidate_set.insert(ep_id, est_dist);
-
-    distk = est_dist;
 
     vl->set(ep_id);
 
+    // int candidate_processed_count = 0;
+    // int knn_updated_count = 0;
+
     while (candidate_set.has_next()) {
+        // candidate_processed_count++;
         // Step 1 - get the next node to explore.
         PID current_node_id = candidate_set.pop();
         int* data = (int*)get_linklist0(current_node_id);
@@ -1224,44 +1222,34 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
                 get_bindata_by_internalid(*(data + j + 1)), 2
             );
 
-            if (!vl->get(candidate_id)) {
-                vl->set(candidate_id);
-                EstimateRecord candest;
-                get_bin_est(q_to_centroids, query_wrapper, candidate_id, candest);
-
-                if (ex_bits_ > 0) {
-                    // Check preliminary score against current worst full estimate.
-                    bool flag_update_KNNs =
-                        boundedKNN.size() < TOPK || candest.low_dist < distk;
-
-                    if (flag_update_KNNs) {
-                        // Compute the full estimate if promising.
-                        get_full_est(q_to_centroids, query_wrapper, candidate_id, candest);
-                        Candidate cand{
-                            ResultRecord(candest.est_dist, candest.low_dist),
-                            static_cast<PID>(candidate_id)
-                        };
-                        boundedKNN.insert(cand);
-                        distk = boundedKNN.worst().record.est_dist;
-                    }
-                } else {
-                    Candidate cand{
-                        ResultRecord(candest.est_dist, candest.low_dist),
-                        static_cast<PID>(candidate_id)
-                    };
-                    boundedKNN.insert(cand);
-                }
-
-                if (!candidate_set.is_full(candest.est_dist)) {
-                    candidate_set.insert(candidate_id, candest.est_dist);
-                }
-
-                rabitqlib::memory::mem_prefetch_l2(
-                    (char*)get_linklist0(candidate_set.next_id()), 2
-                );
+            if(vl->get(candidate_id)) {
+                continue;
             }
+            vl->set(candidate_id);
+            
+            EstimateRecord candest;
+            get_bin_est(q_to_centroids, query_wrapper, candidate_id, candest);
+            
+            bool flag_update = !candidate_set.is_full(candest.est_dist);
+                    // boundedKNN.size() < TOPK || candest.low_dist < distk;
+            if (flag_update) {
+                // knn_updated_count++;
+                // Compute the full estimate if promising.
+                if (ex_bits_ > 0) {
+                    get_full_est(q_to_centroids, query_wrapper, candidate_id, candest);
+                }
+
+                candidate_set.insert(candidate_id, candest.est_dist);
+            }
+
+            rabitqlib::memory::mem_prefetch_l2(
+                (char*)get_linklist0(candidate_set.next_id()), 2
+            );
+            
         }
     }
+
+    // std::cout << "["<<candidate_processed_count<<"] {"<<knn_updated_count<<"}\n";
 
     visited_list_pool_->release_vis_list(vl);
 }
