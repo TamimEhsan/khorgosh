@@ -103,6 +103,47 @@ The current implementation uses `memmove` for every insertion, which is expensiv
 
 ---
 
+### 6. Eliminate Cache-Line Splits in SIMD Binary-Code Loads
+**Impact:** 5 | **Difficulty:** 2 | **Priority:** 2.5
+
+**Location:**
+- `include/rabitqlib/utils/warmup_space.hpp:64,74` (AVX-512 path) and `:118,126` (AVX2 path)
+- `include/rabitqlib/index/hnsw/hnsw.hpp:393, 524` (data allocation)
+- `include/rabitqlib/quantization/data_layout.hpp` (`offsetBinData_` derivation)
+
+**Description:**
+The popcount-heavy distance kernels in `warmup_ip_x0_q` use `_mm256_loadu_si256` / `_mm512_loadu_si512` to load binary quantization codes. **The intrinsic itself is fine** — on Haswell and newer, `vmovdqu` (unaligned) and `vmovdqa` (aligned) have identical throughput when the address is naturally aligned. **Switching to `_mm256_load_si256` would not give a speedup, and would crash if the data isn't actually aligned.**
+
+The real cost being paid is **cache-line splits**: when a 32-byte load straddles a 64-byte L1 cache line, the CPU must read two lines and merge them — roughly 2× the cost of an aligned load. This penalty hits regardless of which intrinsic you choose. AVX-512 is even worse: every misaligned 64-byte load splits.
+
+In khorgosh, the data being loaded is `cur_bin.bin_code()` (`estimator.hpp:177`), which points into `data_level0_memory_`. Two reasons that pointer is usually misaligned:
+1. `data_level0_memory_` is allocated with plain `malloc` (`hnsw.hpp:393`, `:524`) — glibc only guarantees **16-byte** alignment.
+2. Even if the base were aligned, `bin_code()` sits at `offsetBinData_` *inside* each element, which is `size_links_level0_ + 2*sizeof(PID)` bytes from the element start. This depends on `maxM0_` and is almost never a multiple of 32.
+
+This finding extends optimization **#4 (Cache-Line Align Quantized Data)** — that item only addresses the base allocation; this one also fixes the per-element offset.
+
+**Implementation:**
+1. Replace `malloc` with aligned allocation (also handles #4):
+    ```cpp
+    // hnsw.hpp:393, :524
+    size_t bytes = ((max_elements_ * size_data_per_element_ + 63) / 64) * 64;
+    data_level0_memory_ = static_cast<char*>(std::aligned_alloc(64, bytes));
+    ```
+2. Pad `size_data_per_element_` up to a multiple of 64 in the constructor so every element starts on a cache line:
+    ```cpp
+    size_data_per_element_ = ((offsetExData_ + size_ex_data_ + 63) / 64) * 64;
+    ```
+3. Pad `offsetBinData_` so that `bin_code()` itself is at least 32-byte aligned within each element (insert a few bytes of padding between the cluster_id field and the binary block). For AVX-512 paths, target 64-byte alignment.
+4. Once alignment is provable, optionally switch the intrinsics to `_mm256_load_si256` / `_mm512_load_si512` — **no speedup**, but the load instruction will fault on regression instead of silently degrading. Useful as a runtime invariant check during development; can be reverted to `loadu` for production builds.
+5. Add a debug assert in `ConstBinDataMap` ctor: `assert((reinterpret_cast<uintptr_t>(data) & 31) == 0);`
+
+**Expected Gain:** 3-8% faster query latency on the binary-popcount path. The win scales with how often loads straddle cache lines (~50% of misaligned 32-byte loads on average; close to 100% of misaligned 64-byte AVX-512 loads). Bigger absolute impact when `padded_dim` is large because more loads happen per distance computation.
+
+**Important Note:**
+Do **not** change `loadu` → `load` without first guaranteeing alignment from steps 1–3. The unaligned form is currently the safe choice given the misaligned data; flipping the intrinsic without fixing the data layout will SIGSEGV.
+
+---
+
 ## Medium Effort Optimizations
 
 ### 6. Multi-Stage Distance Estimation
@@ -424,21 +465,22 @@ thread_local HashBasedBooleanSet visited_list;
 | 3 | Optimize mask_ip_x0_q Function | 7 | 2 | 3.50 | ✅ |
 | 4 | Batch Neighbor Distance Computations | 6 | 2 | 3.00 | ✅ |
 | 5 | Optimize SearchBuffer Insertion | 6 | 2 | 3.00 | ✅ |
-| 6 | Multi-Stage Distance Estimation | 8 | 4 | 2.00 | |
-| 7 | Aggressive Prefetching Tuning | 6 | 3 | 2.00 | |
-| 8 | Centroid Distance Caching | 6 | 3 | 2.00 | |
-| 9 | Vectorize Error Bound Computations | 5 | 3 | 1.67 | |
-| 10 | Hot/Cold Data Separation | 7 | 5 | 1.40 | |
-| 11 | Dynamic EF Tuning | 7 | 5 | 1.40 | |
-| 12 | Cluster-Aware Graph Navigation | 8 | 6 | 1.33 | |
-| 13 | NUMA-Aware Memory Allocation | 9 | 7 | 1.29 | |
-| 14 | Thread-Local Visited Lists | 5 | 4 | 1.25 | |
-| 15 | Optimize Priority Queue | 6 | 5 | 1.20 | |
-| 16 | Query Batching with Shared LUT | 7 | 6 | 1.17 | |
-| 17 | Adaptive Bit Allocation | 9 | 8 | 1.13 | |
-| 18 | Lock-Free Graph Updates | 8 | 8 | 1.00 | |
-| 19 | Compact Graph Representation | 6 | 7 | 0.86 | |
-| 20 | SIMD Binary Search | 5 | 6 | 0.83 | |
+| 6 | Eliminate Cache-Line Splits in SIMD Loads | 5 | 2 | 2.50 | ✅ |
+| 7 | Multi-Stage Distance Estimation | 8 | 4 | 2.00 | |
+| 8 | Aggressive Prefetching Tuning | 6 | 3 | 2.00 | |
+| 9 | Centroid Distance Caching | 6 | 3 | 2.00 | |
+| 10 | Vectorize Error Bound Computations | 5 | 3 | 1.67 | |
+| 11 | Hot/Cold Data Separation | 7 | 5 | 1.40 | |
+| 12 | Dynamic EF Tuning | 7 | 5 | 1.40 | |
+| 13 | Cluster-Aware Graph Navigation | 8 | 6 | 1.33 | |
+| 14 | NUMA-Aware Memory Allocation | 9 | 7 | 1.29 | |
+| 15 | Thread-Local Visited Lists | 5 | 4 | 1.25 | |
+| 16 | Optimize Priority Queue | 6 | 5 | 1.20 | |
+| 17 | Query Batching with Shared LUT | 7 | 6 | 1.17 | |
+| 18 | Adaptive Bit Allocation | 9 | 8 | 1.13 | |
+| 19 | Lock-Free Graph Updates | 8 | 8 | 1.00 | |
+| 20 | Compact Graph Representation | 6 | 7 | 0.86 | |
+| 21 | SIMD Binary Search | 5 | 6 | 0.83 | |
 
 ---
 
@@ -450,6 +492,7 @@ thread_local HashBasedBooleanSet visited_list;
 3. Optimize mask_ip_x0_q Function
 4. Batch Neighbor Distance Computations
 5. Optimize SearchBuffer Insertion
+6. Eliminate Cache-Line Splits in SIMD Loads (do together with #2)
 
 **Expected Total Gain:** 40-60% overall performance improvement
 
