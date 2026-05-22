@@ -121,11 +121,30 @@ Returned by `RaBitQuantizer.quantize_scalar()`. Contains per-dimension integer c
 
 ### `CoarseIntermediates`
 
-Returned as part of `estimate_distance_coarse()` output. Holds intermediate values that `refine_distance()` needs to refine the 1-bit estimate with extra-bits codes.
+Returned as part of `CoarseDistanceResult.intermediates`. Holds intermediate values that `refine_distance()` needs to refine the 1-bit estimate with extra-bits codes.
 
 | Attribute | C++ Name | Type | Description |
 |-----------|----------|------|-------------|
 | `ip_x0_qr` | `ip_x0_qr` | `float` | Intermediate inner product term from 1-bit estimation |
+
+### `DistanceResult`
+
+Named tuple returned by `RaBitQuantizer.estimate_distance()`. Supports both unpacking (`dist, lb = ...`) and attribute access (`result.distance`).
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `distance` | `float` | Estimated distance between the query and the quantized vector |
+| `lower_bound` | `float` | Distance lower bound (for filtering / early termination) |
+
+### `CoarseDistanceResult`
+
+Named tuple returned by `RaBitQuantizer.estimate_distance_coarse()`. Supports both unpacking (`dist, lb, inter = ...`) and attribute access (`result.intermediates`).
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `distance` | `float` | Coarse estimated distance (1-bit precision) |
+| `lower_bound` | `float` | Distance lower bound |
+| `intermediates` | `CoarseIntermediates` | Intermediate values needed by `refine_distance()` |
 
 ---
 

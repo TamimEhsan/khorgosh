@@ -583,10 +583,13 @@ class RaBitQuantizer:
 
         Returns
         -------
-        distance : float
-            Estimated distance between the query and the quantized vector.
-        lower_bound : float
-            Distance lower bound (for filtering / early termination).
+        DistanceResult
+            Named tuple with fields:
+            - distance : float
+                Estimated distance between the query and the quantized vector.
+            - lower_bound : float
+                Distance lower bound (for filtering / early termination).
+            Supports unpacking: ``dist, lb = quantizer.estimate_distance(...)``
         """
 
     def estimate_distance_coarse(self, quantized_result, query):
@@ -610,12 +613,15 @@ class RaBitQuantizer:
 
         Returns
         -------
-        distance : float
-            Coarse estimated distance (1-bit precision).
-        lower_bound : float
-            Distance lower bound.
-        intermediates : CoarseIntermediates
-            Intermediate inner product values needed by refine_distance().
+        CoarseDistanceResult
+            Named tuple with fields:
+            - distance : float
+                Coarse estimated distance (1-bit precision).
+            - lower_bound : float
+                Distance lower bound.
+            - intermediates : CoarseIntermediates
+                Intermediate inner product values needed by refine_distance().
+            Supports unpacking: ``dist, lb, inter = quantizer.estimate_distance_coarse(...)``
         """
 
     def refine_distance(self, quantized_result, query, intermediates):
@@ -752,7 +758,11 @@ result = quantizer.quantize(data[0], cluster_id=cluster_ids[0])
 # the vector's cluster centroid is subtracted before rotation + quantization
 
 # --- Distance estimation (query rotated automatically) ---
+# Unpacking style:
 dist, lower_bound = quantizer.estimate_distance(result, query)
+# Attribute access style:
+result = quantizer.estimate_distance(result, query)
+print(result.distance, result.lower_bound)
 
 # --- Coarse-to-fine distance estimation ---
 # Quantize multiple vectors, then estimate distances one at a time
@@ -762,13 +772,13 @@ results = [quantizer.quantize(data[i], cluster_id=cluster_ids[i])
 # Step 1: fast 1-bit coarse estimate for each candidate
 coarse = []
 for r in results:
-    d, lb, inter = quantizer.estimate_distance_coarse(r, query)
-    coarse.append((d, inter))
+    cr = quantizer.estimate_distance_coarse(r, query)
+    coarse.append(cr)
 
 # Step 2: refine only the closest candidates with extra-bits
-top_indices = np.argsort([c[0] for c in coarse])[:100]
+top_indices = np.argsort([c.distance for c in coarse])[:100]
 for idx in top_indices:
-    refined = quantizer.refine_distance(results[idx], query, coarse[idx][1])
+    refined = quantizer.refine_distance(results[idx], query, coarse[idx].intermediates)
 
 # --- Scalar quantization + reconstruction ---
 sq_result = quantizer.quantize_scalar(data[0], cluster_id=cluster_ids[0])
@@ -882,6 +892,8 @@ from rabitqlib.quantization.results import (
     QuantizedResult,
     ScalarQuantizedResult,
     CoarseIntermediates,
+    DistanceResult,
+    CoarseDistanceResult,
 )
 
 # Utilities
@@ -900,6 +912,8 @@ __all__ = [
     "QuantizedResult",
     "ScalarQuantizedResult",
     "CoarseIntermediates",
+    "DistanceResult",
+    "CoarseDistanceResult",
     "cluster",
     "recall_at_k",
     "MetricType",
@@ -1028,16 +1042,15 @@ print(f"Compression ratio: {128 * 4 / results[0].codes.shape[0]:.1f}x")
 # --- Step 3: Coarse 1-bit ranking ---
 coarse = []
 for r in results:
-    d, lb, inter = quantizer.estimate_distance_coarse(r, query)
-    coarse.append((d, lb, inter))
+    cr = quantizer.estimate_distance_coarse(r, query)
+    coarse.append(cr)
 
-coarse_dists = [c[0] for c in coarse]
-top100 = np.argsort(coarse_dists)[:100]
+top100 = np.argsort([c.distance for c in coarse])[:100]
 
 # --- Step 4: Refine top candidates with extra-bits ---
 refined = []
 for idx in top100:
-    d = quantizer.refine_distance(results[idx], query, coarse[idx][2])
+    d = quantizer.refine_distance(results[idx], query, coarse[idx].intermediates)
     refined.append((idx, d))
 
 best = min(refined, key=lambda x: x[1])
