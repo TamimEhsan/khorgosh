@@ -50,12 +50,14 @@
 
 | C++ Function | Signature | Python Wrapper | Notes |
 |--------------|-----------|----------------|-------|
-| No direct equivalent | N/A | `RaBitQuantizer(dim, nbits, metric, fast)` constructor | Python-only wrapper class — holds dim, nbits, metric, and internally calls `faster_config()` when `fast=True` |
+| No direct equivalent | N/A | `RaBitQuantizer(dim, nbits, metric, fast, rotator, normalizer)` constructor | Python-only wrapper class — holds config, optional `Rotator`, and optional normalizer (centroids). Calls `faster_config()` internally when `fast=True`. |
 | `faster_config()` | `faster_config(dim, total_bits) → RabitqConfig` | Called internally by `RaBitQuantizer.__init__(fast=True)` | Hidden — no standalone function needed |
-| `quantize_compact_one_bit()` | `quantize_compact_one_bit(data*, centroid*, padded_dim, bin_data*, metric)` | `RaBitQuantizer.quantize(data, centroids)` when `nbits=1` | Merged into unified `quantize()` |
-| `quantize_compact_ex_bits()` | `quantize_compact_ex_bits(data*, centroid*, padded_dim, ex_bits, ex_data*, metric, config)` | `RaBitQuantizer.quantize(data, centroids)` when `nbits>1` | Merged into unified `quantize()` |
-| `quantize_full_single()` | `quantize_full_single(data*, [centroid*,] dim, total_bits, total_code*, f_add, f_rescale, f_error, metric, config)` | `RaBitQuantizer.quantize(data, centroids) → QuantizedResult` | Out-params → returned `QuantizedResult` object |
-| `quantize_scalar()` | `quantize_scalar(data*, [centroid*,] dim, total_bits, total_code*, delta, vl, config, scalar_type)` | `RaBitQuantizer.quantize_scalar(data, centroids, mode) → ScalarQuantizedResult` | `scalar_type` enum → `mode` string (`'reconstruction'`/`'unbiased'`/`'plain'`) |
+| No direct equivalent | N/A | `RaBitQuantizer.save(path)` | Python-only — serializes dim, nbits, metric, fast, rotator state, and normalizer centroids to a single file |
+| No direct equivalent | N/A | `RaBitQuantizer.load(path)` classmethod → `RaBitQuantizer` | Python-only — reconstructs the full quantizer from a saved file |
+| `quantize_compact_one_bit()` | `quantize_compact_one_bit(data*, centroid*, padded_dim, bin_data*, metric)` | `RaBitQuantizer.quantize(data, cluster_id)` when `nbits=1` | Merged into unified `quantize()`; centroid lookup via normalizer + cluster_id |
+| `quantize_compact_ex_bits()` | `quantize_compact_ex_bits(data*, centroid*, padded_dim, ex_bits, ex_data*, metric, config)` | `RaBitQuantizer.quantize(data, cluster_id)` when `nbits>1` | Merged into unified `quantize()` |
+| `quantize_full_single()` | `quantize_full_single(data*, [centroid*,] dim, total_bits, total_code*, f_add, f_rescale, f_error, metric, config)` | `RaBitQuantizer.quantize(data, cluster_id) → QuantizedResult` | Single vector; out-params → returned `QuantizedResult`; centroid from normalizer |
+| `quantize_scalar()` | `quantize_scalar(data*, [centroid*,] dim, total_bits, total_code*, delta, vl, config, scalar_type)` | `RaBitQuantizer.quantize_scalar(data, cluster_id, mode) → ScalarQuantizedResult` | Single vector; `scalar_type` enum → `mode` string (`'reconstruction'`/`'unbiased'`/`'plain'`) |
 | `reconstruct_vec()` | `reconstruct_vec(quantized_vec*, delta, vl, dim, results*)` | `RaBitQuantizer.reconstruct(scalar_result) → np.ndarray` | Takes `ScalarQuantizedResult` directly instead of separate args |
 | `quantize_one_batch()` | `quantize_one_batch(data*, centroid*, num, padded_dim, batch_data*, metric)` | Not exposed | Internal fastscan layout — used by index types only |
 | `quantize_split_batch()` | `quantize_split_batch(data*, centroid*, num, padded_dim, ex_bits, batch_data*, ex_data*, metric, config)` | Not exposed | Internal fastscan layout — used by index types only |
@@ -64,9 +66,9 @@
 
 | C++ Function | Signature | Python Wrapper | Notes |
 |--------------|-----------|----------------|-------|
-| `split_single_estdist()` | `split_single_estdist(bin_data*, q_obj, padded_dim, ip_x0_qr, est_dist, low_dist, g_add, g_error)` | `RaBitQuantizer.estimate_distance_coarse(quantized_result, queries) → (distances, lower_bounds)` | 1-bit only distance estimation — fast but coarse. Works even when `nbits > 1` by using only the 1-bit base codes. Returns estimated distances and error lower bounds. |
-| `split_distance_boosting()` | `split_distance_boosting(ex_data*, ip_func, q_obj, padded_dim, ex_bits, ip_x0_qr) → float` | `RaBitQuantizer.refine_distance(quantized_result, queries, coarse_intermediates) → distances` | Refines 1-bit estimates using extra-bits codes. Takes intermediate results from `estimate_distance_coarse()` and produces a more accurate distance. |
-| `split_single_fulldist()` | `split_single_fulldist(bin_data*, ex_data*, ip_func, q_obj, padded_dim, ex_bits, est_dist, low_dist, ip_x0_qr, g_add, g_error)` | `RaBitQuantizer.estimate_distance(quantized_result, queries) → (distances, lower_bounds)` | Full multi-bit distance estimation in one pass (1-bit + extra-bits combined). |
+| `split_single_estdist()` | `split_single_estdist(bin_data*, q_obj, padded_dim, ip_x0_qr, est_dist, low_dist, g_add, g_error)` | `RaBitQuantizer.estimate_distance_coarse(quantized_result, query) → (distance, lower_bound, intermediates)` | 1-bit only distance estimation — fast but coarse. Works even when `nbits > 1` by using only the 1-bit base codes. Single vector + single query. |
+| `split_distance_boosting()` | `split_distance_boosting(ex_data*, ip_func, q_obj, padded_dim, ex_bits, ip_x0_qr) → float` | `RaBitQuantizer.refine_distance(quantized_result, query, intermediates) → distance` | Refines a 1-bit estimate using extra-bits codes. Takes intermediate result from `estimate_distance_coarse()`. Single vector + single query. |
+| `split_single_fulldist()` | `split_single_fulldist(bin_data*, ex_data*, ip_func, q_obj, padded_dim, ex_bits, est_dist, low_dist, ip_x0_qr, g_add, g_error)` | `RaBitQuantizer.estimate_distance(quantized_result, query) → (distance, lower_bound)` | Full multi-bit distance estimation in one pass (1-bit + extra-bits combined). Single vector + single query. |
 | `split_batch_estdist()` | `split_batch_estdist(batch_data*, q_obj, padded_dim, est_distance*, low_distance*, ip_x0_qr*, high_accuracy)` | Used internally by `IvfIndex.search()` | Batch 1-bit estimation with fastscan — internal to IVF |
 | `full_est_dist()` | `full_est_dist(quantized_vec*, query*, ip_func, dim, bits, f_add, f_rescale, g_add, k1xsumq) → float` | Used internally by `estimate_distance()` | Low-level distance formula — wrapped by higher-level methods |
 | `qg_batch_estdist()` | `qg_batch_estdist(batch_data*, q_obj, padded_dim, est_distance*)` | Used internally by `SymqgIndex.search()` | SymQG-specific batch estimation — internal |
@@ -76,7 +78,7 @@
 | C++ Method | Signature | Python Wrapper | Notes |
 |------------|-----------|----------------|-------|
 | `choose_rotator()` | `choose_rotator(dim, type, padded_dim) → Rotator<T>*` | `Rotator(dim, method)` constructor | Factory hidden — `method` string (`'fht_kac'`/`'matrix'`) replaces `RotatorType` enum |
-| `Rotator::rotate()` | `rotate(src*, dst*)` | `Rotator.rotate(data) → np.ndarray` | Single-vector → batched; allocates output internally |
+| `Rotator::rotate()` | `rotate(src*, dst*)` | `Rotator.rotate(data) → np.ndarray` | Single vector; allocates output internally instead of writing to dst pointer |
 | `Rotator::save()` | `save(ofstream&)` | `Rotator.save(path)` | File path string instead of stream |
 | `Rotator::load()` | `load(ifstream&)` | `Rotator.load(path)` classmethod | Returns new instance |
 | `Rotator::size()` | `size() → size_t` | `Rotator.padded_dim` property | Renamed for clarity |
@@ -101,34 +103,35 @@
 
 #### `QuantizedResult`
 
-Returned by `RaBitQuantizer.quantize()`. Contains the quantized codes and the distance estimation factors needed by `estimate_distance()`, `estimate_distance_coarse()`, and `refine_distance()`.
+Returned by `RaBitQuantizer.quantize()`. Contains the quantized code, distance estimation factors, and the cluster assignment for a single vector. The `cluster_id` is stored so that `estimate_distance*()` can automatically subtract the correct centroid from the query before computing the distance.
 
-| Attribute | C++ Name | Type | Shape | Description |
-|-----------|----------|------|-------|-------------|
-| `codes` | `total_code` / `bin_data` + `ex_data` | `np.ndarray`, uint8 | `(n, code_size)` | Packed binary quantization codes |
-| `add_factor` | `f_add` | `np.ndarray`, float32 | `(n,)` | Additive factor for distance estimation |
-| `scale_factor` | `f_rescale` | `np.ndarray`, float32 | `(n,)` | Multiplicative factor for distance estimation |
-| `error_factor` | `f_error` | `np.ndarray`, float32 | `(n,)` | Error bound factor (used to compute distance lower bounds) |
-| `nbits` | `total_bits` | `int` | — | Number of bits per dimension used |
-| `has_extra_bits` | `ex_bits > 0` | `bool` | — | `True` if `nbits > 1` (extra-bits codes are present) |
+| Attribute | C++ Name | Type | Description |
+|-----------|----------|------|-------------|
+| `codes` | `total_code` / `bin_data` + `ex_data` | `np.ndarray`, uint8, shape `(code_size,)` | Packed binary quantization code |
+| `add_factor` | `f_add` | `float` | Additive factor for distance estimation |
+| `scale_factor` | `f_rescale` | `float` | Multiplicative factor for distance estimation |
+| `error_factor` | `f_error` | `float` | Error bound factor (used to compute distance lower bounds) |
+| `cluster_id` | N/A | `int` or `None` | Cluster assignment used during quantization. `None` if no normalizer or single centroid. Used by `estimate_distance*()` to look up the centroid and process the query as `rotate(q - centroid)`. |
+| `nbits` | `total_bits` | `int` | Number of bits per dimension used |
+| `has_extra_bits` | `ex_bits > 0` | `bool` | `True` if `nbits > 1` (extra-bits codes are present) |
 
 #### `ScalarQuantizedResult`
 
-Returned by `RaBitQuantizer.quantize_scalar()`. Contains per-dimension integer codes and the parameters needed to reconstruct the original vectors via `RaBitQuantizer.reconstruct()`.
+Returned by `RaBitQuantizer.quantize_scalar()`. Contains per-dimension integer codes and the parameters needed to reconstruct the vector via `RaBitQuantizer.reconstruct()`.
 
-| Attribute | C++ Name | Type | Shape | Description |
-|-----------|----------|------|-------|-------------|
-| `codes` | `total_code` | `np.ndarray`, uint8 | `(n, dim)` | Per-dimension quantized codes in `[0, 2^bits - 1]` |
-| `delta` | `delta` | `np.ndarray`, float32 | `(n,)` | Bin width per vector (reconstruction: `value = code * delta + lower_bound`) |
-| `lower_bound` | `vl` | `np.ndarray`, float32 | `(n,)` | Lower bound per vector |
+| Attribute | C++ Name | Type | Description |
+|-----------|----------|------|-------------|
+| `codes` | `total_code` | `np.ndarray`, uint8, shape `(dim,)` | Per-dimension quantized codes in `[0, 2^bits - 1]` |
+| `delta` | `delta` | `float` | Bin width (reconstruction: `value = code * delta + lower_bound`) |
+| `lower_bound` | `vl` | `float` | Lower bound |
 
 #### `CoarseIntermediates`
 
-Returned as part of `estimate_distance_coarse()` output. Holds intermediate values that `refine_distance()` needs to refine 1-bit estimates with extra-bits codes.
+Returned as part of `estimate_distance_coarse()` output. Holds intermediate values that `refine_distance()` needs to refine the 1-bit estimate with extra-bits codes.
 
-| Attribute | C++ Name | Type | Shape | Description |
-|-----------|----------|------|-------|-------------|
-| `ip_x0_qr` | `ip_x0_qr` | `np.ndarray`, float32 | `(nq, n)` | Intermediate inner product terms from 1-bit estimation |
+| Attribute | C++ Name | Type | Description |
+|-----------|----------|------|-------------|
+| `ip_x0_qr` | `ip_x0_qr` | `float` | Intermediate inner product term from 1-bit estimation |
 
 ---
 
@@ -581,6 +584,11 @@ class RaBitQuantizer:
     custom pipelines, integrate quantization into existing systems, or
     compress vector datasets for storage and transmission.
 
+    Optionally takes a Rotator and/or a normalizer (centroids) at
+    construction time. If provided, rotation and centroid subtraction
+    are applied automatically during quantize() and distance estimation
+    calls — no manual preprocessing needed.
+
     Parameters
     ----------
     dim : int
@@ -594,51 +602,70 @@ class RaBitQuantizer:
     fast : bool, default=True
         Use pre-computed constant rescaling factors for faster quantization.
         Slightly less accurate but significantly faster for nbits > 1.
-    random_seed : int, optional
-        Seed for reproducibility. If None, uses random device.
+    rotator : Rotator, optional
+        If provided, vectors are rotated before quantization and queries
+        are rotated before distance estimation. Ensures consistency
+        between indexing and query time.
+    normalizer : np.ndarray, optional
+        Cluster centroids for residual quantization.
+        - None: no centroid subtraction (quantize raw vectors).
+        - shape (dim,) or (1, dim): single centroid subtracted from
+          all vectors. cluster_ids not needed in quantize().
+        - shape (num_clusters, dim): multiple centroids. cluster_ids
+          required in quantize() to look up each vector's centroid.
     """
 
     def __init__(self, dim, nbits=1, metric='l2', fast=True,
-                 random_seed=None): ...
+                 rotator=None, normalizer=None): ...
 
-    def quantize(self, data, centroids=None):
-        """Quantize vectors into RaBitQ codes.
+    def quantize(self, data, cluster_id=None):
+        """Quantize a single vector into a RaBitQ code.
+
+        Internally applies centroid subtraction (if normalizer was provided)
+        and rotation (if rotator was provided) before quantizing.
 
         Parameters
         ----------
-        data : np.ndarray, shape (n, dim), dtype float32
-            Vectors to quantize.
-        centroids : np.ndarray, shape (n, dim), dtype float32, optional
-            Per-vector centroids (residual quantization).
-            If None, quantizes raw vectors (centroid = zero vector).
+        data : np.ndarray, shape (dim,), dtype float32
+            Vector to quantize.
+        cluster_id : int, optional
+            Cluster assignment for this vector. Required when normalizer
+            has multiple centroids (shape (num_clusters, dim)). Ignored
+            when normalizer is None or a single centroid.
 
         Returns
         -------
         QuantizedResult
             Object containing:
-            - codes : np.ndarray, shape (n, code_size), dtype uint8
-                Quantized binary codes.
-            - add_factor : np.ndarray, shape (n,), dtype float32
-                Additive distance estimation factor per vector.
-            - scale_factor : np.ndarray, shape (n,), dtype float32
-                Multiplicative distance estimation factor per vector.
-            - error_factor : np.ndarray, shape (n,), dtype float32
-                Error bound factor per vector.
+            - codes : np.ndarray, shape (code_size,), dtype uint8
+                Quantized binary code.
+            - add_factor : float
+                Additive distance estimation factor.
+            - scale_factor : float
+                Multiplicative distance estimation factor.
+            - error_factor : float
+                Error bound factor.
+
+        Raises
+        ------
+        ValueError
+            If normalizer has multiple centroids and cluster_id is None.
         """
 
-    def quantize_scalar(self, data, centroids=None,
+    def quantize_scalar(self, data, cluster_id=None,
                         mode='reconstruction'):
-        """Quantize vectors using scalar quantization.
+        """Quantize a single vector using scalar quantization.
 
         Scalar quantization maps each dimension to an integer in
-        [0, 2^nbits - 1] using uniform binning.
+        [0, 2^nbits - 1] using uniform binning. Applies normalizer
+        and rotator if configured.
 
         Parameters
         ----------
-        data : np.ndarray, shape (n, dim), dtype float32
-            Vectors to quantize.
-        centroids : np.ndarray, shape (n, dim), dtype float32, optional
-            Per-vector centroids. If None, quantizes raw vectors.
+        data : np.ndarray, shape (dim,), dtype float32
+            Vector to quantize.
+        cluster_id : int, optional
+            Cluster assignment for this vector. Same rules as quantize().
         mode : str, default='reconstruction'
             Quantizer objective:
             - 'reconstruction': minimize reconstruction error
@@ -649,67 +676,77 @@ class RaBitQuantizer:
         -------
         ScalarQuantizedResult
             Object containing:
-            - codes : np.ndarray, shape (n, dim), dtype uint8
+            - codes : np.ndarray, shape (dim,), dtype uint8
                 Per-dimension quantized codes.
-            - delta : np.ndarray, shape (n,), dtype float32
-                Bin width per vector (for reconstruction).
-            - lower_bound : np.ndarray, shape (n,), dtype float32
-                Lower bound per vector (for reconstruction).
+            - delta : float
+                Bin width (for reconstruction).
+            - lower_bound : float
+                Lower bound (for reconstruction).
         """
 
-    def estimate_distance(self, quantized_result, queries):
-        """Estimate distances using all available bits (1-bit + extra-bits).
+    def estimate_distance(self, quantized_result, query):
+        """Estimate distance using all available bits (1-bit + extra-bits).
 
-        Full-precision distance estimation in one pass. Uses all bits
-        from the quantized codes for the most accurate estimate.
+        Full-precision distance estimation in one pass. Internally handles
+        all preprocessing of the query:
+        - If normalizer is set, subtracts the centroid from the query
+          using the cluster_id stored in quantized_result.
+        - If rotator is set, rotates the adjusted query.
 
         Parameters
         ----------
         quantized_result : QuantizedResult
-            Output from quantize().
-        queries : np.ndarray, shape (nq, dim), dtype float32
-            Query vectors.
+            Output from quantize(). The stored cluster_id is used to
+            look up the centroid for query adjustment.
+        query : np.ndarray, shape (dim,), dtype float32
+            Query vector in original space.
 
         Returns
         -------
-        distances : np.ndarray, shape (nq, n), dtype float32
-            Estimated distances between each query and each quantized vector.
-        lower_bounds : np.ndarray, shape (nq, n), dtype float32
-            Distance lower bounds (for filtering / early termination).
+        distance : float
+            Estimated distance between the query and the quantized vector.
+        lower_bound : float
+            Distance lower bound (for filtering / early termination).
         """
 
-    def estimate_distance_coarse(self, quantized_result, queries):
-        """Estimate distances using only the 1-bit base codes.
+    def estimate_distance_coarse(self, quantized_result, query):
+        """Estimate distance using only the 1-bit base codes.
 
         Fast but coarse distance estimation. Works regardless of nbits —
         even if quantized with nbits=5, this uses only the 1-bit codes
-        for a quick initial ranking before optionally refining with
+        for a quick initial estimate before optionally refining with
         refine_distance().
+
+        Query preprocessing (centroid subtraction via cluster_id stored
+        in quantized_result, then rotation) is handled internally.
 
         Parameters
         ----------
         quantized_result : QuantizedResult
             Output from quantize(). Only the 1-bit codes are used.
-        queries : np.ndarray, shape (nq, dim), dtype float32
-            Query vectors.
+            The stored cluster_id is used for query adjustment.
+        query : np.ndarray, shape (dim,), dtype float32
+            Query vector in original space.
 
         Returns
         -------
-        distances : np.ndarray, shape (nq, n), dtype float32
-            Coarse estimated distances (1-bit precision).
-        lower_bounds : np.ndarray, shape (nq, n), dtype float32
-            Distance lower bounds.
+        distance : float
+            Coarse estimated distance (1-bit precision).
+        lower_bound : float
+            Distance lower bound.
         intermediates : CoarseIntermediates
             Intermediate inner product values needed by refine_distance().
         """
 
-    def refine_distance(self, quantized_result, queries, intermediates,
-                       candidate_ids=None):
-        """Refine 1-bit distance estimates using extra-bits codes.
+    def refine_distance(self, quantized_result, query, intermediates):
+        """Refine a 1-bit distance estimate using extra-bits codes.
 
         Takes the intermediate results from estimate_distance_coarse() and
         uses the extra-bits codes to produce a more accurate distance.
         Requires nbits > 1 (i.e., extra-bits must be present).
+
+        Query preprocessing (centroid subtraction + rotation) is handled
+        internally, same as estimate_distance_coarse().
 
         Typical workflow:
             1. estimate_distance_coarse() on all candidates → coarse ranking
@@ -719,24 +756,21 @@ class RaBitQuantizer:
         ----------
         quantized_result : QuantizedResult
             Output from quantize(). Must have nbits > 1.
-        queries : np.ndarray, shape (nq, dim), dtype float32
-            Query vectors.
+            The stored cluster_id is used for query adjustment.
+        query : np.ndarray, shape (dim,), dtype float32
+            Query vector in original space.
         intermediates : CoarseIntermediates
             Output from estimate_distance_coarse().
-        candidate_ids : np.ndarray, shape (nq, m), dtype uint32, optional
-            Indices of candidates to refine per query. If None, refines
-            all vectors (equivalent to estimate_distance with all bits).
 
         Returns
         -------
-        distances : np.ndarray, shape (nq, m) or (nq, n), dtype float32
-            Refined distance estimates (higher precision than 1-bit).
-            Shape depends on whether candidate_ids is provided.
+        distance : float
+            Refined distance estimate (higher precision than 1-bit).
         """
 
     @staticmethod
     def reconstruct(scalar_result):
-        """Reconstruct float vectors from scalar-quantized codes.
+        """Reconstruct a float vector from scalar-quantized codes.
 
         Parameters
         ----------
@@ -745,8 +779,8 @@ class RaBitQuantizer:
 
         Returns
         -------
-        reconstructed : np.ndarray, shape (n, dim), dtype float32
-            Reconstructed vectors: value = code * delta + lower_bound
+        reconstructed : np.ndarray, shape (dim,), dtype float32
+            Reconstructed vector: value = code * delta + lower_bound
         """
 
     @property
@@ -759,8 +793,47 @@ class RaBitQuantizer:
     def code_size(self) -> int:
         """Size of the quantized code per vector in bytes."""
 
+    def save(self, path):
+        """Save the quantizer to disk.
+
+        Serializes all state needed to reconstruct this quantizer:
+        dim, nbits, metric, fast, rotator state (if any), and
+        normalizer centroids (if any).
+
+        Parameters
+        ----------
+        path : str
+            File path to write to.
+        """
+
+    @classmethod
+    def load(cls, path):
+        """Load a saved quantizer from disk.
+
+        Returns a fully reconstructed RaBitQuantizer with the same
+        rotator and normalizer that were present when save() was called.
+
+        Parameters
+        ----------
+        path : str
+            File path to read from.
+
+        Returns
+        -------
+        quantizer : RaBitQuantizer
+            Loaded quantizer ready for quantize() and estimate_distance*().
+        """
+
+    @property
+    def rotator(self) -> 'Rotator | None':
+        """The rotator used for preprocessing, or None."""
+
+    @property
+    def normalizer(self) -> 'np.ndarray | None':
+        """The centroids used for normalization, or None."""
+
     def __repr__(self) -> str:
-        """e.g. RaBitQuantizer(dim=128, nbits=5, metric='l2', fast=True)"""
+        """e.g. RaBitQuantizer(dim=128, nbits=5, metric='l2', rotator=Rotator(dim=128), normalizer=(100, 128))"""
 ```
 
 **Usage:**
@@ -770,42 +843,58 @@ import numpy as np
 import rabitqlib
 
 data = np.random.randn(10000, 128).astype('float32')
-queries = np.random.randn(100, 128).astype('float32')
+query = np.random.randn(128).astype('float32')
 
-# --- 1-bit quantization (fastest) ---
+# --- Simplest: no rotation, no normalization ---
 quantizer = rabitqlib.RaBitQuantizer(dim=128, nbits=1)
-result = quantizer.quantize(data)
-# result.codes: (10000, 16) uint8 — 128 bits packed into 16 bytes
-# result.add_factor, result.scale_factor, result.error_factor: (10000,) float32
+result = quantizer.quantize(data[0])
 
-# --- Multi-bit quantization (better accuracy) ---
-quantizer = rabitqlib.RaBitQuantizer(dim=128, nbits=5)
-result = quantizer.quantize(data)
+# --- With rotation (recommended) ---
+rotator = rabitqlib.Rotator(dim=128)
+quantizer = rabitqlib.RaBitQuantizer(dim=128, nbits=5, rotator=rotator)
+result = quantizer.quantize(data[0])
+# rotation is applied automatically — no manual rotate() call needed
 
-# --- Residual quantization (relative to centroids) ---
-centroids, cids = rabitqlib.cluster(data, num_clusters=100)
-per_vec_centroids = centroids[cids]  # shape (10000, 128)
-result = quantizer.quantize(data, centroids=per_vec_centroids)
+# --- With rotation + single centroid normalization ---
+mean_centroid = data.mean(axis=0)
+quantizer = rabitqlib.RaBitQuantizer(
+    dim=128, nbits=5, rotator=rotator, normalizer=mean_centroid
+)
+result = quantizer.quantize(data[0])
+# cluster_id not needed — single centroid subtracted from the vector
 
-# --- Full distance estimation (all bits) ---
-dists, lower_bounds = quantizer.estimate_distance(result, queries)
+# --- With rotation + multi-centroid normalization ---
+centroids, cluster_ids = rabitqlib.cluster(data, num_clusters=100)
+quantizer = rabitqlib.RaBitQuantizer(
+    dim=128, nbits=5, rotator=rotator, normalizer=centroids
+)
+result = quantizer.quantize(data[0], cluster_id=cluster_ids[0])
+# the vector's cluster centroid is subtracted before rotation + quantization
+
+# --- Distance estimation (query rotated automatically) ---
+dist, lower_bound = quantizer.estimate_distance(result, query)
 
 # --- Coarse-to-fine distance estimation ---
-# Step 1: fast 1-bit ranking over all candidates
-coarse_dists, _, intermediates = quantizer.estimate_distance_coarse(result, queries)
+# Quantize multiple vectors, then estimate distances one at a time
+results = [quantizer.quantize(data[i], cluster_id=cluster_ids[i])
+           for i in range(len(data))]
 
-# Step 2: refine only the top-100 candidates per query with extra-bits
-top100 = np.argsort(coarse_dists, axis=1)[:, :100]
-refined_dists = quantizer.refine_distance(
-    result, queries, intermediates, candidate_ids=top100
-)
-# refined_dists shape: (nq, 100) — distances for the top-100 candidates only
+# Step 1: fast 1-bit coarse estimate for each candidate
+coarse = []
+for r in results:
+    d, lb, inter = quantizer.estimate_distance_coarse(r, query)
+    coarse.append((d, inter))
+
+# Step 2: refine only the closest candidates with extra-bits
+top_indices = np.argsort([c[0] for c in coarse])[:100]
+for idx in top_indices:
+    refined = quantizer.refine_distance(results[idx], query, coarse[idx][1])
 
 # --- Scalar quantization + reconstruction ---
-sq_result = quantizer.quantize_scalar(data)
+sq_result = quantizer.quantize_scalar(data[0], cluster_id=cluster_ids[0])
 reconstructed = rabitqlib.RaBitQuantizer.reconstruct(sq_result)
-error = np.linalg.norm(data - reconstructed, axis=1).mean()
-print(f"Mean reconstruction error: {error:.4f}")
+error = np.linalg.norm(data[0] - reconstructed)
+print(f"Reconstruction error: {error:.4f}")
 ```
 
 ---
@@ -842,17 +931,17 @@ class Rotator:
     def __init__(self, dim, method='fht_kac', random_seed=None): ...
 
     def rotate(self, data):
-        """Apply rotation to vectors.
+        """Apply rotation to a single vector.
 
         Parameters
         ----------
-        data : np.ndarray, shape (n, dim), dtype float32
-            Input vectors.
+        data : np.ndarray, shape (dim,), dtype float32
+            Input vector.
 
         Returns
         -------
-        rotated : np.ndarray, shape (n, padded_dim), dtype float32
-            Rotated (and possibly zero-padded) vectors.
+        rotated : np.ndarray, shape (padded_dim,), dtype float32
+            Rotated (and possibly zero-padded) vector.
         """
 
     def save(self, path):
@@ -877,21 +966,17 @@ class Rotator:
 **Usage:**
 
 ```python
-# Standalone quantization pipeline
+# Standalone usage — rotator is constructed separately, passed to quantizer
 rotator = rabitqlib.Rotator(dim=128, method='fht_kac')
 
-# Rotate data before quantization
-rotated_data = rotator.rotate(data)            # (10000, 128) → (10000, 128)
-rotated_queries = rotator.rotate(queries)      # must use same rotator
+# Quantizer handles rotation automatically
+quantizer = rabitqlib.RaBitQuantizer(dim=128, nbits=5, rotator=rotator)
+result = quantizer.quantize(data)
 
-# Quantize the rotated vectors
-quantizer = rabitqlib.RaBitQuantizer(dim=rotator.padded_dim, nbits=5)
-result = quantizer.quantize(rotated_data)
+# Queries are rotated automatically during distance estimation
+est_dists, _ = quantizer.estimate_distance(result, queries)
 
-# Estimate distances on rotated space
-est_dists, _ = quantizer.estimate_distance(result, rotated_queries)
-
-# Save/load rotator for consistency between indexing and querying
+# Save/load rotator for reuse across sessions
 rotator.save("rotator.bin")
 rotator2 = rabitqlib.Rotator.load("rotator.bin")
 ```
@@ -1080,47 +1165,46 @@ import numpy as np
 import rabitqlib
 
 data = np.random.randn(10_000, 128).astype('float32')
-queries = np.random.randn(100, 128).astype('float32')
+query = np.random.randn(128).astype('float32')
 
-# --- Step 1: Rotate vectors (required preprocessing for RaBitQ) ---
+# --- Step 1: Set up quantizer with rotation + centroids ---
 rotator = rabitqlib.Rotator(dim=128, method='fht_kac')
-rotated_data = rotator.rotate(data)
-rotated_queries = rotator.rotate(queries)
-
-# --- Step 2: Quantize with RaBitQ (multi-bit) ---
+centroids, cluster_ids = rabitqlib.cluster(data, num_clusters=100)
 quantizer = rabitqlib.RaBitQuantizer(
-    dim=rotator.padded_dim, nbits=5, metric='l2'
+    dim=128, nbits=5, metric='l2', rotator=rotator, normalizer=centroids
 )
-result = quantizer.quantize(rotated_data)
 
-print(f"Code size per vector: {result.codes.shape[1]} bytes")
-print(f"Compression ratio: {128 * 4 / result.codes.shape[1]:.1f}x")
+# --- Step 2: Quantize each vector ---
+results = [quantizer.quantize(data[i], cluster_id=cluster_ids[i])
+           for i in range(len(data))]
 
-# --- Step 3: Estimate distances from quantized codes ---
-est_dists, _ = quantizer.estimate_distance(result, rotated_queries)
-approx_nn = np.argmin(est_dists, axis=1)
+print(f"Code size per vector: {results[0].codes.shape[0]} bytes")
+print(f"Compression ratio: {128 * 4 / results[0].codes.shape[0]:.1f}x")
 
-# --- Step 4: Compare with exact distances ---
-from scipy.spatial.distance import cdist
-true_dists = cdist(queries, data)
-exact_nn = np.argmin(true_dists, axis=1)
-recall_1 = np.mean(approx_nn == exact_nn)
-print(f"Recall@1 from quantized codes: {recall_1:.3f}")
+# --- Step 3: Coarse 1-bit ranking ---
+coarse = []
+for r in results:
+    d, lb, inter = quantizer.estimate_distance_coarse(r, query)
+    coarse.append((d, lb, inter))
+
+coarse_dists = [c[0] for c in coarse]
+top100 = np.argsort(coarse_dists)[:100]
+
+# --- Step 4: Refine top candidates with extra-bits ---
+refined = []
+for idx in top100:
+    d = quantizer.refine_distance(results[idx], query, coarse[idx][2])
+    refined.append((idx, d))
+
+best = min(refined, key=lambda x: x[1])
+print(f"Nearest neighbor: vector {best[0]}, distance {best[1]:.4f}")
 
 # --- Step 5: Scalar quantization + reconstruction ---
-sq_result = quantizer.quantize_scalar(rotated_data)
+sq_result = quantizer.quantize_scalar(data[0], cluster_id=cluster_ids[0])
 reconstructed = rabitqlib.RaBitQuantizer.reconstruct(sq_result)
-mse = np.mean((rotated_data - reconstructed) ** 2)
-print(f"Scalar quantization MSE: {mse:.6f}")
+error = np.linalg.norm(data[0] - reconstructed)
+print(f"Reconstruction error: {error:.4f}")
 
-# --- Step 6: Residual quantization (with centroids) ---
-centroids, cids = rabitqlib.cluster(data, num_clusters=100)
-per_vec_centroids = centroids[cids]
-rotated_centroids = rotator.rotate(per_vec_centroids)
-result_residual = quantizer.quantize(rotated_data, centroids=rotated_centroids)
-# Residual codes are more compact and accurate since residuals
-# have smaller magnitude and more uniform distribution
-
-# --- Save rotator for query-time use ---
+# --- Save rotator for reuse ---
 rotator.save("rotator.bin")
 ```
