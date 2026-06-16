@@ -28,7 +28,7 @@ def main(args=None) -> None:
 
     # 3. Build IVF index
     print(f"\nBuilding IVF index: bits={args.total_bits}, metric={args.metric}, "
-          f"faster_quant={args.faster_quant}")
+          f"num_threads={args.num_threads}, faster_quant={args.faster_quant}")
 
     idx = IvfIndex(
         dim=dim,
@@ -39,7 +39,7 @@ def main(args=None) -> None:
     )
 
     t0 = time()
-    idx.build(data, centroids, cluster_ids, fast_quantization=args.faster_quant)
+    idx.build(data, centroids, cluster_ids, num_threads=args.num_threads, fast_quantization=args.faster_quant)
     elapsed_min = (time() - t0) / 60
 
     print("IVF constructed")
