@@ -10,7 +10,7 @@ NUM_CLUSTERS = 256          # number of clusters (K for IVF)
 TOTAL_BITS   = 8            # total number of bits for quantization
 METRIC       = "l2"         # "l2" or "ip"
 FASTER_QUANT = True         # use faster quantization
-NUM_THREADS  = 1            # number of threads for building the index
+NUM_THREADS  = 16           # number of threads for building the index
 # ──────────────────────────────────────────────
 
 
@@ -23,12 +23,12 @@ def main(args=None) -> None:
     print(f"\tDIM: {dim}")
 
     # 2. Cluster with FAISS
-    centroids, cluster_ids = cluster_data(data, args.num_clusters, args.metric)
+    centroids, cluster_ids = cluster_data(data, args.num_clusters, args.metric, args.num_threads)
     print(f"Centroids: {centroids.shape}, cluster_ids: {cluster_ids.shape}")
 
     # 3. Build IVF index
     print(f"\nBuilding IVF index: bits={args.total_bits}, metric={args.metric}, "
-          f"faster_quant={args.faster_quant}")
+          f"num_threads={args.num_threads}, faster_quant={args.faster_quant}")
 
     idx = IvfIndex(
         dim=dim,
@@ -39,7 +39,7 @@ def main(args=None) -> None:
     )
 
     t0 = time()
-    idx.build(data, centroids, cluster_ids, fast_quantization=args.faster_quant)
+    idx.build(data, centroids, cluster_ids, num_threads=args.num_threads, fast_quantization=args.faster_quant)
     elapsed_min = (time() - t0) / 60
 
     print("IVF constructed")

@@ -39,6 +39,7 @@ class IvfIndex {
         py::handle data,
         py::handle centroids,
         py::handle cluster_ids,
+        size_t num_threads = 1,
         bool fast_quantization = false
     ) {
         auto data_array = ensure_2d_array<float>(data, "data");
@@ -55,7 +56,7 @@ class IvfIndex {
             throw std::invalid_argument("cluster_ids length must match number of rows in data");
         }
 
-        index_->construct(data_array.data(), centroids_array.data(), cluster_ids_array.data(), fast_quantization);
+        index_->construct(data_array.data(), centroids_array.data(), cluster_ids_array.data(), fast_quantization, num_threads);
         built_ = true;
     }
 
@@ -161,6 +162,7 @@ void register_ivf(py::module_ &m) {
            py::arg("data"),
            py::arg("centroids"),
            py::arg("cluster_ids"),
+           py::arg("num_threads") = 1,
            py::arg("fast_quantization") = false)
        .def("search", &IvfIndex::search,
            py::arg("queries"),

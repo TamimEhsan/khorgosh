@@ -23,6 +23,7 @@
 #include "rabitqlib/utils/memory.hpp"
 #include "rabitqlib/utils/rotator.hpp"
 #include "rabitqlib/utils/space.hpp"
+#include "rabitqlib/utils/tools.hpp"
 
 namespace rabitqlib::ivf {
 class IVF {
@@ -111,7 +112,7 @@ class IVF {
     [[nodiscard]] MetricType metric_type() const { return metric_type_; }
     [[nodiscard]] RotatorType rotator_type() const { return type_; }
 
-    void construct(const float*, const float*, const PID*, bool);
+    void construct(const float*, const float*, const PID*, bool, size_t);
 
     void save(const char*) const;
 
@@ -167,7 +168,8 @@ inline IVF::~IVF() {
  * @param clustter_ids Cluster ID for each data objects
  */
 inline void IVF::construct(
-    const float* data, const float* centroids, const PID* cluster_ids, bool faster = false
+    const float* data, const float* centroids, const PID* cluster_ids, bool faster = false,
+    size_t num_threads = std::numeric_limits<size_t>::max()
 ) {
     std::cout << "Start IVF construction...\n";
 
@@ -198,8 +200,9 @@ inline void IVF::construct(
         config = quant::faster_config(padded_dim_, ex_bits_ + 1);
     }
 
+    num_threads = std::min(num_threads, rabitqlib::total_threads());
     /* Quantize each cluster */
-#pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic) num_threads(num_threads)
     for (size_t i = 0; i < num_cluster_; ++i) {
         const float* cur_centroid = centroids + (i * dim_);
         float* cur_rotated_c = &rotated_centroids[i * padded_dim_];
@@ -207,7 +210,7 @@ inline void IVF::construct(
         quantize_cluster(cp, id_lists[i], data, cur_centroid, cur_rotated_c, config);
     }
 
-    this->initer_->add_vectors(rotated_centroids.data());
+    this->initer_->add_vectors(rotated_centroids.data(), num_threads);
 }
 
 inline void IVF::allocate_memory(const std::vector<size_t>& cluster_sizes) {

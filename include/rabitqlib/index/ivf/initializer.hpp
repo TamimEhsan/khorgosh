@@ -80,7 +80,7 @@ class Initializer {
     explicit Initializer(size_t d, size_t k) : dim_(d), num_cluster_(k) {}
     virtual ~Initializer() = 0;
     [[nodiscard]] virtual const float* centroid(PID) const = 0;
-    virtual void add_vectors(const float*) = 0;
+    virtual void add_vectors(const float*, size_t) = 0;
     virtual void centroids_distances(
         const float*, size_t, std::vector<AnnCandidate<float>>&
     ) const = 0;
@@ -103,7 +103,7 @@ class FlatInitializer : public Initializer {
         return &centroids_[id * dim_];
     }
 
-    void add_vectors(const float* cent) override {
+    void add_vectors(const float* cent, size_t) override {
         std::memcpy(centroids_.data(), cent, sizeof(float) * num_cluster_ * dim_);
     }
 
@@ -156,11 +156,10 @@ class HNSWInitializer : public Initializer {
         );
     }
 
-    void add_vectors(const float* cent) override {
+    void add_vectors(const float* cent, size_t num_threads) override {
         std::cout << "Inserting vectors into hnsw...\n";
         size_t start = 0;
         size_t rows = num_cluster_;
-        size_t num_threads = 0;
         parallel_for(start, rows, num_threads, [&](size_t row, size_t /*thread_id*/) {
             alg_hnsw_->addPoint(cent + (row * dim_), row);
         });
