@@ -12,7 +12,7 @@ EF_CONSTRUCTION = 200           # ef for indexing
 TOTAL_BITS      = 8             # total number of bits for quantization
 METRIC          = "l2"          # "l2" or "ip"
 FASTER_QUANT    = False         # use faster quantization
-NUM_THREADS     = 4             # number of threads for build
+NUM_THREADS     = 16            # number of threads for build
 # ──────────────────────────────────────────────
 
 
@@ -22,7 +22,7 @@ def main(args=None) -> None:
     print(f"Data shape: {data.shape}")
 
     # 2. Cluster with FAISS
-    centroids, cluster_ids = cluster_data(data, args.num_clusters, args.metric)
+    centroids, cluster_ids = cluster_data(data, args.num_clusters, args.metric, args.num_threads)
     print(f"Centroids: {centroids.shape}, cluster_ids: {cluster_ids.shape}")
 
     # 3. Build HNSW index

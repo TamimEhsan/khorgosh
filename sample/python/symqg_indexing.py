@@ -9,7 +9,7 @@ from utils import read_fvecs
 MAX_DEGREE      = 32            # degree bound for SymphonyQG
 EF_CONSTRUCTION = 200           # ef for indexing
 METRIC          = "l2"          # "l2" or "ip"
-NUM_THREADS     = 1             # number of threads for build
+NUM_THREADS     = 16            # number of threads for build
 # ──────────────────────────────────────────────
 
 

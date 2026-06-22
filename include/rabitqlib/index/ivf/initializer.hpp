@@ -103,7 +103,7 @@ class FlatInitializer : public Initializer {
         return &centroids_[id * dim_];
     }
 
-    void add_vectors(const float* cent, size_t num_threads) override {
+    void add_vectors(const float* cent, size_t) override {
         std::memcpy(centroids_.data(), cent, sizeof(float) * num_cluster_ * dim_);
     }
 

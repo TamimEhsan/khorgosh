@@ -41,6 +41,7 @@ def cluster_data(
     X: np.ndarray,
     K: int,
     metric_str: str = "l2",
+    num_threads: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Cluster X into K clusters using FAISS IVF.
@@ -50,6 +51,9 @@ def cluster_data(
     centroids   : np.ndarray, shape (K, dim), float32
     cluster_ids : np.ndarray, shape (n,),     uint32
     """
+    if num_threads > 0:
+        faiss.omp_set_num_threads(num_threads)
+
     dim = X.shape[1]
 
     if metric_str == "ip":
