@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <vector>
 
 #include "rabitqlib/index/hnsw/hnsw.hpp"
 #include "rabitqlib/utils/io.hpp"
@@ -73,23 +75,51 @@ int main(int argc, char* argv[]) {
         num_points, dim, total_bits, m, ef, random_seed, metric_type
     );
 
+    // Build the index with the first 80% of the data, then stream the
+    // remaining 20% in via add() in 10%-of-dataset batches to exercise the
+    // dynamic-add path.
+    size_t build_count = (num_points * 80) / 100;
+    size_t batch_size = num_points / 10;  // 10% of the dataset per batch
+    if (batch_size == 0) {
+        batch_size = 1;
+    }
+
     rabitqlib::StopW stopw;
     stopw.reset();
 
     hnsw->construct(
         centroids.rows(),
         centroids.data(),
-        num_points,
+        build_count,
         data.data(),
         cluster_id.data(),
         0,
         faster_quant
     );
 
-    float total_time = stopw.get_elapsed_micro();
-    total_time /= 1e6;
+    float build_time = stopw.get_elapsed_micro() / 1e6;
+    std::cout << "built index with " << build_count << " / " << num_points
+              << " points in " << build_time << "s" << '\n';
 
-    std::cout << "indexing time = " << total_time << "s" << '\n';
+    // Labels mirror the global row index so they stay consistent with the
+    // built portion (construct uses the row index as the label).
+    std::vector<PID> labels(num_points);
+    for (size_t i = 0; i < num_points; i++) {
+        labels[i] = static_cast<PID>(i);
+    }
+
+    stopw.reset();
+    for (size_t start = build_count; start < num_points; start += batch_size) {
+        size_t end = std::min(start + batch_size, num_points);
+        // num_threads = 0 -> use all available cores for the batch insert.
+        hnsw->add(data.data() + (start * dim), labels.data() + start, end - start, 0);
+        std::cout << "added points [" << start << ", " << end << ")\n";
+    }
+    float add_time = stopw.get_elapsed_micro() / 1e6;
+
+    std::cout << "added " << (num_points - build_count) << " points in " << add_time
+              << "s" << '\n';
+    std::cout << "total indexing time = " << (build_time + add_time) << "s" << '\n';
     hnsw->save(index_file);
 
     std::cout << "index saved..." << '\n';

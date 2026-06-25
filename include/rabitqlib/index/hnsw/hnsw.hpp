@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -58,6 +59,15 @@ class HierarchicalNSW {
     std::vector<std::vector<std::pair<float, PID>>> search(
         const float*, size_t, size_t, size_t, size_t
     );
+
+    // Dynamic operations (only valid after construct()/load()).
+    // add() inserts `num` vectors (row-major, num x dim) with the given labels,
+    // optionally across num_threads worker threads.
+    void add(const float*, const PID*, size_t, size_t = 1);
+    void delete_by_id(PID);
+
+    [[nodiscard]] size_t num_deleted() const { return num_deleted_; }
+    [[nodiscard]] size_t current_count() const { return cur_element_count_; }
 
     const float* rawDataPtr_{nullptr};
 
@@ -146,6 +156,9 @@ class HierarchicalNSW {
     char* data_level0_memory_{nullptr};
     char** linkLists_{nullptr};
     std::vector<int> element_levels_;  // keeps level of each element
+    // Tombstones are stored as a bit in the level-0 link header (see DELETE_MARK),
+    // so they ride inside data_level0_memory_ for free on save/load.
+    std::atomic<size_t> num_deleted_{0};
 
     size_t num_cluster_{0};
     size_t dim_{0};
@@ -193,6 +206,7 @@ class HierarchicalNSW {
         free(reinterpret_cast<void*>(linkLists_));
         linkLists_ = nullptr;
         cur_element_count_ = 0;
+        num_deleted_ = 0;
 
         free(centroids_memory_);
 
@@ -288,6 +302,26 @@ class HierarchicalNSW {
         *(reinterpret_cast<unsigned short int*>(ptr)) = size;
     }
 
+    // The level-0 link header reserves sizeof(PID) bytes for the edge count but
+    // only the low 2 bytes are used (see get/set_list_count). We steal byte +2 to
+    // mark a slot deleted; set_list_count never touches it, so the two coexist.
+    static constexpr unsigned char DELETE_MARK = 0x01;
+
+    [[nodiscard]] bool is_marked_deleted(PID internal_id) const {
+        const auto* mark =
+            reinterpret_cast<const unsigned char*>(get_linklist0(internal_id)) + 2;
+        return (*mark & DELETE_MARK) != 0;
+    }
+
+    void mark_deleted_internal(PID internal_id) {
+        std::unique_lock<std::mutex> lock(link_list_locks_[internal_id]);
+        auto* mark = reinterpret_cast<unsigned char*>(get_linklist0(internal_id)) + 2;
+        if ((*mark & DELETE_MARK) == 0) {
+            *mark |= DELETE_MARK;
+            num_deleted_++;
+        }
+    }
+
     // ANN Search
     void get_bin_est(
         std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
@@ -324,6 +358,20 @@ class HierarchicalNSW {
     }
 
     void add_point(PID, PID, const quant::RabitqConfig&);
+
+    // Dynamic-add helpers (estimator-based, no rawDataPtr_).
+    void add_point_est(const float* vec, PID label, const quant::RabitqConfig& config);
+    void resize_index(size_t);
+    PID assign_centroid(const float* rotated_vec) const;
+    void compute_q_to_centroids(const float* rotated_query, std::vector<float>&) const;
+    std::vector<std::pair<float, PID>> search_layer_est(
+        PID ep_id,
+        int level,
+        size_t ef,
+        SplitSingleQuery<float>& query_wrapper,
+        std::vector<float>& q_to_centroids
+    );
+    PID connect_naive(PID cur_c, const std::vector<std::pair<float, PID>>& cands, int level);
 
     maxheap<std::pair<float, PID>> search_base_layer(PID, PID, int);
 
@@ -407,6 +455,7 @@ inline HierarchicalNSW::HierarchicalNSW(
     update_probability_generator_.seed(random_seed + 1);
 
     cur_element_count_ = 0;
+    num_deleted_ = 0;
 
     visited_list_pool_ = std::make_unique<VisitedListPool>(1, max_elements_);
 
@@ -546,11 +595,20 @@ inline void HierarchicalNSW::load(const char* filename) {
     }
 
     element_levels_ = std::vector<int>(max_elements_);
+    num_deleted_ = 0;
     revSize_ = 1.0 / mult_;
     ef_ = 10;
 
+    // Tombstones are recomputed from the level-0 headers (they were serialized
+    // for free inside data_level0_memory_). Deleted slots are kept in the graph
+    // as routing hubs but excluded from the label lookup, so their external ids
+    // stay free to re-add (and a re-added live slot is never shadowed by them).
     for (size_t i = 0; i < cur_element_count_; i++) {
-        label_lookup_[get_external_label(i)] = i;
+        if (is_marked_deleted(static_cast<PID>(i))) {
+            num_deleted_++;
+        } else {
+            label_lookup_[get_external_label(i)] = i;
+        }
         unsigned int link_list_size;
         input.read(reinterpret_cast<char*>(&link_list_size), sizeof(unsigned int));
         if (link_list_size == 0) {
@@ -744,6 +802,247 @@ inline void HierarchicalNSW::add_point(
     }
 }
 
+// ===========================================================================
+// Insertion: add_point() is the build-time path (exact distances via
+// rawDataPtr_); add_point_est()/add() are the dynamic post-build path
+// (estimator distances). Kept adjacent as raw/estimate counterparts.
+// ===========================================================================
+
+// Insert a single vector. Neighbors are selected with the RaBitQ estimator
+// since raw vectors are not retained. Estimate-distance counterpart of the
+// build-time add_point() above.
+inline void HierarchicalNSW::add_point_est(
+    const float* vec, PID label, const quant::RabitqConfig& config
+) {
+    std::unique_lock<std::mutex> lock_label(get_lable_op_mutex(label));
+
+    std::vector<float> rotated(padded_dim_);
+    rotator_->rotate(vec, rotated.data());
+
+    PID cluster_id = assign_centroid(rotated.data());
+
+    PID cur_c = 0;
+    {
+        std::unique_lock<std::mutex> lock_table(label_lookup_lock_);
+        if (label_lookup_.find(label) != label_lookup_.end()) {
+            throw std::runtime_error("add(): element with this label already exists");
+        }
+        // Capacity is reserved by the caller (add()) before any parallel insert;
+        // resizing here would realloc shared storage under concurrent inserts.
+        if (cur_element_count_ >= max_elements_) {
+            throw std::runtime_error("add(): the number of elements exceeds the capacity");
+        }
+        cur_c = cur_element_count_;
+        cur_element_count_++;
+        label_lookup_[label] = cur_c;
+    }
+
+    std::unique_lock<std::mutex> lock_el(link_list_locks_[cur_c]);
+    int curlevel = get_random_level(mult_);
+    element_levels_[cur_c] = curlevel;
+
+    std::unique_lock<std::mutex> templock(global_);
+    int maxlevelcopy = maxlevel_;
+    if (curlevel <= maxlevelcopy) {
+        templock.unlock();
+    }
+    PID curr_obj = enterpoint_node_;
+
+    // Initialize the slot, then quantize the rotated vector into it.
+    memset(
+        data_level0_memory_ + (cur_c * size_data_per_element_), 0, size_data_per_element_
+    );
+    memcpy(get_external_label_pt(cur_c), &label, sizeof(PID));
+    memcpy(get_clusterid_pt(cur_c), &cluster_id, sizeof(PID));
+
+    quant::quantize_split_single(
+        rotated.data(),
+        reinterpret_cast<float*>(centroids_memory_) + (cluster_id * padded_dim_),
+        padded_dim_,
+        ex_bits_,
+        get_bindata_by_internalid(cur_c),
+        get_exdata_by_internalid(cur_c),
+        metric_type_,
+        config
+    );
+
+    if (curlevel > 0) {
+        linkLists_[cur_c] =
+            static_cast<char*>(malloc((size_links_per_element_ * curlevel) + 1));
+        if (linkLists_[cur_c] == nullptr) {
+            throw std::runtime_error("add(): failed to allocate linklist");
+        }
+        memset(linkLists_[cur_c], 0, (size_links_per_element_ * curlevel) + 1);
+    } else {
+        linkLists_[cur_c] = nullptr;
+    }
+
+    if (static_cast<signed>(curr_obj) != -1) {
+        SplitSingleQuery<float> query_wrapper(
+            rotated.data(), padded_dim_, ex_bits_, query_config_, metric_type_
+        );
+        std::vector<float> q_to_centroids;
+        compute_q_to_centroids(rotated.data(), q_to_centroids);
+
+        // Greedy descent through the upper levels using the cheap binary estimate.
+        if (curlevel < maxlevelcopy) {
+            EstimateRecord curest;
+            get_bin_est(q_to_centroids, query_wrapper, curr_obj, curest);
+            for (int lev = maxlevelcopy; lev > curlevel; lev--) {
+                bool changed = true;
+                while (changed) {
+                    changed = false;
+                    std::unique_lock<std::mutex> lock(link_list_locks_[curr_obj]);
+                    PID* data = get_linklist(curr_obj, lev);
+                    int size = get_list_count(data);
+                    PID* datal = data + 1;
+                    for (int i = 0; i < size; i++) {
+                        PID cand = datal[i];
+                        EstimateRecord candest;
+                        get_bin_est(q_to_centroids, query_wrapper, cand, candest);
+                        if (candest.est_dist < curest.est_dist) {
+                            curest = candest;
+                            curr_obj = cand;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (int lev = std::min(curlevel, maxlevelcopy); lev >= 0; lev--) {
+            auto cands =
+                search_layer_est(curr_obj, lev, ef_construction_, query_wrapper, q_to_centroids);
+            curr_obj = connect_naive(cur_c, cands, lev);
+        }
+    } else {
+        // First element ever inserted.
+        enterpoint_node_ = 0;
+        maxlevel_ = curlevel;
+    }
+
+    if (curlevel > maxlevelcopy) {
+        enterpoint_node_ = cur_c;
+        maxlevel_ = curlevel;
+    }
+}
+
+// Insert a batch of vectors (row-major, num x dim) after construct()/load().
+// Inserted sequentially since the dynamic-add path is not thread-safe with
+// concurrent inserts or resizes.
+inline void HierarchicalNSW::add(
+    const float* data, const PID* labels, size_t num, size_t num_threads
+) {
+    if (num_cluster_ == 0) {
+        throw std::runtime_error("add() requires a built or loaded index");
+    }
+
+    // Reserve capacity up front (single-threaded) so resize_index() never runs
+    // during the parallel inserts below — it reallocates shared storage and
+    // swaps the per-element lock vector, which cannot happen concurrently with
+    // add_point_est(). With capacity pre-reserved, add_point_est() is safe to
+    // run in parallel the same way construct() runs add_point().
+    if (cur_element_count_ + num > max_elements_) {
+        resize_index(cur_element_count_ + num);
+    }
+
+    quant::RabitqConfig config;
+    rabitqlib::ivf::parallel_for(
+        0,
+        num,
+        num_threads,
+        [&](size_t idx, size_t /*threadId*/) {
+            add_point_est(data + (idx * dim_), labels[idx], config);
+        }
+    );
+}
+
+// --- add() helpers ---------------------------------------------------------
+
+// Pick the nearest rotated centroid as the RaBitQ residual reference.
+inline PID HierarchicalNSW::assign_centroid(const float* rotated_vec) const {
+    const auto* cents = reinterpret_cast<const float*>(centroids_memory_);
+    PID best = 0;
+    float best_dist = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < num_cluster_; i++) {
+        float d = euclidean_sqr<float>(rotated_vec, cents + (i * padded_dim_), padded_dim_);
+        if (d < best_dist) {
+            best_dist = d;
+            best = static_cast<PID>(i);
+        }
+    }
+    return best;
+}
+
+// Distances from a rotated query to every centroid, in the layout the
+// estimator expects (mirrors search_knn's preprocessing).
+inline void HierarchicalNSW::compute_q_to_centroids(
+    const float* rotated_query, std::vector<float>& q_to_centroids
+) const {
+    const auto* cents = reinterpret_cast<const float*>(centroids_memory_);
+    if (metric_type_ == METRIC_L2) {
+        q_to_centroids.resize(num_cluster_);
+        for (size_t i = 0; i < num_cluster_; i++) {
+            q_to_centroids[i] =
+                std::sqrt(raw_dist_func_(rotated_query, cents + (i * padded_dim_), padded_dim_));
+        }
+    } else {
+        q_to_centroids.resize(2 * num_cluster_);
+        for (size_t i = 0; i < num_cluster_; i++) {
+            q_to_centroids[i] =
+                dot_product(rotated_query, cents + (i * padded_dim_), padded_dim_);
+            q_to_centroids[i + num_cluster_] =
+                std::sqrt(euclidean_sqr(rotated_query, cents + (i * padded_dim_), padded_dim_));
+        }
+    }
+}
+
+// Grow the index to hold new_max elements. Not safe to call concurrently with
+// search or add; intended for the single-threaded dynamic-add path.
+inline void HierarchicalNSW::resize_index(size_t new_max) {
+    if (new_max <= max_elements_) {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(global_);
+
+    visited_list_pool_ = std::make_unique<VisitedListPool>(1, new_max);
+
+    // Per-element locks are not movable, so rebuild the vector at the new size.
+    std::vector<std::mutex>(new_max).swap(link_list_locks_);
+
+    element_levels_.resize(new_max);
+
+    char* data_new = reinterpret_cast<char*>(
+        realloc(data_level0_memory_, new_max * size_data_per_element_)
+    );
+    if (data_new == nullptr) {
+        throw std::runtime_error("resize_index: failed to reallocate data_level0_memory_");
+    }
+    data_level0_memory_ = data_new;
+
+    char** ll_new =
+        reinterpret_cast<char**>(realloc(linkLists_, sizeof(void*) * new_max));
+    if (ll_new == nullptr) {
+        throw std::runtime_error("resize_index: failed to reallocate linkLists_");
+    }
+    linkLists_ = ll_new;
+
+    max_elements_ = new_max;
+}
+
+// Tombstone an element by its external id. The node stays in the graph as a
+// routing hub; search just stops admitting it into results.
+inline void HierarchicalNSW::delete_by_id(PID label) {
+    std::unique_lock<std::mutex> lock_table(label_lookup_lock_);
+    auto it = label_lookup_.find(label);
+    if (it == label_lookup_.end()) {
+        throw std::runtime_error("delete_by_id(): label not found");
+    }
+    PID internal_id = it->second;
+    label_lookup_.erase(it);
+    mark_deleted_internal(internal_id);
+}
+
 inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_base_layer(
     PID ep_id, PID cur_c, int layer
 ) {
@@ -822,6 +1121,75 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_base_layer(
     }
     visited_list_pool_->release_vis_list(vl);
     return top_candidates;
+}
+
+// Estimate-distance counterpart of search_base_layer() above: same best-first
+// layer walk, but distances come from the RaBitQ estimator (no rawDataPtr_) and
+// it works at any level. Returns up to ef candidates ascending by distance.
+inline std::vector<std::pair<float, PID>> HierarchicalNSW::search_layer_est(
+    PID ep_id,
+    int level,
+    size_t ef,
+    SplitSingleQuery<float>& query_wrapper,
+    std::vector<float>& q_to_centroids
+) {
+    HashBasedBooleanSet* vl = visited_list_pool_->get_free_vislist();
+
+    maxheap<std::pair<float, PID>> top_candidates;  // worst on top, bounded by ef
+    minheap<std::pair<float, PID>> candidate_set;   // best on top, drives traversal
+
+    auto est = [&](PID id) {
+        EstimateRecord rec;
+        get_full_est(q_to_centroids, query_wrapper, id, rec);
+        return rec.est_dist;
+    };
+
+    float d0 = est(ep_id);
+    top_candidates.emplace(d0, ep_id);
+    candidate_set.emplace(d0, ep_id);
+    vl->set(ep_id);
+    float lower_bound = d0;
+
+    while (!candidate_set.empty()) {
+        std::pair<float, PID> cur = candidate_set.top();
+        if (cur.first > lower_bound && top_candidates.size() == ef) {
+            break;
+        }
+        candidate_set.pop();
+
+        PID node = cur.second;
+        std::unique_lock<std::mutex> lock(link_list_locks_[node]);
+        PID* data = (level == 0) ? get_linklist0(node) : get_linklist(node, level);
+        size_t size = get_list_count(data);
+        PID* datal = data + 1;
+
+        for (size_t j = 0; j < size; j++) {
+            PID cand = datal[j];
+            if (vl->get(cand)) {
+                continue;
+            }
+            vl->set(cand);
+            float d = est(cand);
+            if (top_candidates.size() < ef || lower_bound > d) {
+                candidate_set.emplace(d, cand);
+                top_candidates.emplace(d, cand);
+                if (top_candidates.size() > ef) {
+                    top_candidates.pop();
+                }
+                lower_bound = top_candidates.top().first;
+            }
+        }
+    }
+    visited_list_pool_->release_vis_list(vl);
+
+    std::vector<std::pair<float, PID>> out;
+    out.reserve(top_candidates.size());
+    while (!top_candidates.empty()) {
+        out.push_back(top_candidates.top());
+        top_candidates.pop();
+    }
+    std::reverse(out.begin(), out.end());  // ascending by distance (nearest first)
+    return out;
 }
 
 inline PID HierarchicalNSW::mutually_connect_new_element(
@@ -931,6 +1299,50 @@ inline PID HierarchicalNSW::mutually_connect_new_element(
     }
 
     return next_closest_entry_point;
+}
+
+// Estimate-path counterpart of mutually_connect_new_element() above. Same role
+// (wire a new node to its neighbors with back-edges), but skips the distance
+// heuristic: it links the M nearest candidates directly and appends a back-edge
+// only when the neighbor has room (the "naive connect" trade-off).
+inline PID HierarchicalNSW::connect_naive(
+    PID cur_c, const std::vector<std::pair<float, PID>>& cands, int level
+) {
+    size_t max_m = level > 0 ? maxM_ : maxM0_;
+    size_t n = std::min(cands.size(), M_);
+
+    PID* ll_cur = (level == 0) ? get_linklist0(cur_c) : get_linklist(cur_c, level);
+    if (*ll_cur != 0) {
+        throw std::runtime_error("connect_naive: new element should have empty link list");
+    }
+    set_list_count(ll_cur, static_cast<unsigned short int>(n));
+    PID* cur_data = ll_cur + 1;
+    for (size_t i = 0; i < n; i++) {
+        cur_data[i] = cands[i].second;
+    }
+
+    PID next_entry_point = n > 0 ? cands[0].second : cur_c;
+
+    for (size_t i = 0; i < n; i++) {
+        PID neigh = cands[i].second;
+        std::unique_lock<std::mutex> lock(link_list_locks_[neigh]);
+        PID* ll_other = (level == 0) ? get_linklist0(neigh) : get_linklist(neigh, level);
+        size_t sz = get_list_count(ll_other);
+        PID* other_data = ll_other + 1;
+
+        bool present = false;
+        for (size_t j = 0; j < sz; j++) {
+            if (other_data[j] == cur_c) {
+                present = true;
+                break;
+            }
+        }
+        if (!present && sz < max_m) {
+            other_data[sz] = cur_c;
+            set_list_count(ll_other, static_cast<unsigned short int>(sz + 1));
+        }
+    }
+    return next_entry_point;
 }
 
 inline void HierarchicalNSW::get_neighbors_by_heuristic2(
@@ -1209,8 +1621,10 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
     float est_dist = start_estimate_record.est_dist;
     float low_dist = start_estimate_record.low_dist;
 
-    // Insert initial candidate.
-    boundedKNN.insert({ResultRecord(est_dist, low_dist), ep_id});
+    // Insert initial candidate (skip as a result if tombstoned, but still route).
+    if (!is_marked_deleted(ep_id)) {
+        boundedKNN.insert({ResultRecord(est_dist, low_dist), ep_id});
+    }
     candidate_set.insert(ep_id, est_dist);
 
     distk = est_dist;
@@ -1247,7 +1661,8 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
 
             bool flag_update_KNNs = boundedKNN.size() < TOPK || candest.low_dist < distk;
 
-            if (flag_update_KNNs) {
+            // Tombstoned nodes are still traversed below, but never admitted as results.
+            if (flag_update_KNNs && !is_marked_deleted(candidate_id)) {
                 // Compute the full estimate if promising.
                 if (ex_bits_ > 0) {
                     get_full_est(q_to_centroids, query_wrapper, candidate_id, candest);

@@ -118,6 +118,35 @@ class HnswIndex {
         return py::make_tuple(ids, dists);
     }
 
+    void add(py::handle data, py::handle labels, size_t num_threads = 1) {
+        if (!built_) {
+            throw std::runtime_error("HnswIndex must be built or loaded before add");
+        }
+        auto data_array = ensure_2d_array<float>(data, "data");
+        auto labels_array = ensure_1d_array<rabitqlib::PID>(labels, "labels");
+        if (static_cast<size_t>(data_array.shape(1)) != dim_) {
+            throw std::invalid_argument("data dimension does not match index dim");
+        }
+        if (labels_array.shape(0) != data_array.shape(0)) {
+            throw std::invalid_argument("labels length must match number of rows in data");
+        }
+        index_->add(
+            data_array.data(),
+            labels_array.data(),
+            static_cast<size_t>(data_array.shape(0)),
+            num_threads
+        );
+    }
+
+    void delete_by_id(rabitqlib::PID label) {
+        if (!built_) {
+            throw std::runtime_error("HnswIndex must be built or loaded before delete_by_id");
+        }
+        index_->delete_by_id(label);
+    }
+
+    [[nodiscard]] size_t num_deleted() const { return index_ ? index_->num_deleted() : 0; }
+
     void save(const std::string& path) const {
         if (!built_) {
             throw std::runtime_error("HnswIndex must be built or loaded before save");
@@ -188,12 +217,18 @@ void register_hnsw(py::module_ &m) {
              py::arg("k"),
              py::arg("ef") = 0,
              py::arg("num_threads") = 1)
+        .def("add", &HnswIndex::add,
+             py::arg("data"),
+             py::arg("labels"),
+             py::arg("num_threads") = 1)
+        .def("delete_by_id", &HnswIndex::delete_by_id, py::arg("label"))
         .def("save", &HnswIndex::save, py::arg("path"))
         .def_static("load", &HnswIndex::load, py::arg("path"))
         .def_property_readonly("dim", &HnswIndex::dim)
         .def_property_readonly("max_elements", &HnswIndex::max_elements)
         .def_property_readonly("nbits", &HnswIndex::nbits)
         .def_property_readonly("num_clusters", &HnswIndex::num_clusters)
+        .def_property_readonly("num_deleted", &HnswIndex::num_deleted)
         .def_property_readonly("is_built", &HnswIndex::is_built)
         .def_property_readonly("metric", &HnswIndex::metric);
 }
