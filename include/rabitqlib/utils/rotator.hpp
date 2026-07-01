@@ -4,12 +4,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <random>
 
 #include "rabitqlib/defines.hpp"
+#include "rabitqlib/simd/rotator_dispatch.hpp"
 #include "rabitqlib/utils/fht_avx.hpp"
 #include "rabitqlib/utils/space.hpp"
 #include "rabitqlib/utils/tools.hpp"
@@ -113,81 +115,7 @@ class MatrixRotator : public Rotator<T> {
 };
 
 static inline void flip_sign(const uint8_t* flip, float* data, size_t dim) {
-#if defined(__AVX512F__) && defined(__AVX512DQ__)
-    constexpr size_t kFloatsPerChunk = 64;  // Process 64 floats per iteration
-    // constexpr size_t bits_per_chunk = floats_per_chunk;  // 64 bits = 8 bytes
-
-    static_assert(
-        kFloatsPerChunk % 16 == 0,
-        "floats_per_chunk must be divisible by AVX512 register width"
-    );
-
-    for (size_t i = 0; i < dim; i += kFloatsPerChunk) {
-        // Load 64 bits (8 bytes) from the bit sequence
-        uint64_t mask_bits;
-        std::memcpy(&mask_bits, &flip[i / 8], sizeof(mask_bits));
-
-        // Split into four 16-bit mask segments
-        const __mmask16 mask0 = _cvtu32_mask16(static_cast<uint32_t>(mask_bits & 0xFFFF));
-        const __mmask16 mask1 =
-            _cvtu32_mask16(static_cast<uint32_t>((mask_bits >> 16) & 0xFFFF));
-        const __mmask16 mask2 =
-            _cvtu32_mask16(static_cast<uint32_t>((mask_bits >> 32) & 0xFFFF));
-        const __mmask16 mask3 =
-            _cvtu32_mask16(static_cast<uint32_t>((mask_bits >> 48) & 0xFFFF));
-
-        // Prepare sign-flip constant
-        const __m512 sign_flip = _mm512_castsi512_ps(_mm512_set1_epi32(0x80000000));
-
-        // Process 16 floats at a time with each mask segment
-        __m512 vec0 = _mm512_loadu_ps(&data[i]);
-        vec0 = _mm512_mask_xor_ps(vec0, mask0, vec0, sign_flip);
-        _mm512_storeu_ps(&data[i], vec0);
-
-        __m512 vec1 = _mm512_loadu_ps(&data[i + 16]);
-        vec1 = _mm512_mask_xor_ps(vec1, mask1, vec1, sign_flip);
-        _mm512_storeu_ps(&data[i + 16], vec1);
-
-        __m512 vec2 = _mm512_loadu_ps(&data[i + 32]);
-        vec2 = _mm512_mask_xor_ps(vec2, mask2, vec2, sign_flip);
-        _mm512_storeu_ps(&data[i + 32], vec2);
-
-        __m512 vec3 = _mm512_loadu_ps(&data[i + 48]);
-        vec3 = _mm512_mask_xor_ps(vec3, mask3, vec3, sign_flip);
-        _mm512_storeu_ps(&data[i + 48], vec3);
-    }
-#elif defined(__AVX2__)
-   // Process 32 floats (4 AVX2 registers) per iteration
-    constexpr size_t kFloatsPerChunk = 32; 
-    
-    const __m256i bit_select = _mm256_setr_epi32(
-        0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80
-    );
-    const __m256 sign_flip = _mm256_castsi256_ps(_mm256_set1_epi32(0x80000000));
-
-    // utility lambda to create a mask for flipping signs
-    auto create_mask = [&](uint8_t byte_mask) -> __m256 {
-        __m256i mask_bits = _mm256_set1_epi32(byte_mask);
-        __m256i test = _mm256_and_si256(mask_bits, bit_select);
-        __m256i cmp = _mm256_cmpeq_epi32(test, bit_select);
-        return _mm256_and_ps(_mm256_castsi256_ps(cmp), sign_flip);
-    } ;
-
-    for (size_t i = 0; i < dim; i += kFloatsPerChunk) {
-        uint32_t mask_bits;
-        std::memcpy(&mask_bits, &flip[i / 8], sizeof(mask_bits));
-
-        for (int b = 0; b < 4; ++b) {
-            __m256 xor_mask = create_mask((mask_bits >> (b * 8)) & 0xFF);
-            __m256 vec = _mm256_loadu_ps(&data[i + b * 8]);
-            vec = _mm256_xor_ps(vec, xor_mask);
-            _mm256_storeu_ps(&data[i + b * 8], vec);
-        }
-    }
-#else
-    std:: cerr << "Sign flip requires AVX512 or AVX2 support!\n";
-    exit(1);
-#endif
+    simd::flip_sign(flip, data, dim);
 }
 
 class FhtKacRotator : public Rotator<float> {
@@ -283,34 +211,7 @@ class FhtKacRotator : public Rotator<float> {
     }
 
     static void kacs_walk(float* data, size_t len) {
-    #if defined(__AVX512F__)
-        // ! len % 32 == 0;
-        for (size_t i = 0; i < len / 2; i += 16) {
-            __m512 x = _mm512_loadu_ps(&data[i]);
-            __m512 y = _mm512_loadu_ps(&data[i + (len / 2)]);
-
-            __m512 new_x = _mm512_add_ps(x, y);
-            __m512 new_y = _mm512_sub_ps(x, y);
-
-            _mm512_storeu_ps(&data[i], new_x);
-            _mm512_storeu_ps(&data[i + (len / 2)], new_y);
-        }
-    #elif defined(__AVX2__)
-        // ! len % 16 == 0;
-        for (size_t i = 0; i < len / 2; i += 8) {
-            __m256 x = _mm256_loadu_ps(&data[i]);
-            __m256 y = _mm256_loadu_ps(&data[i + (len / 2)]);
-
-            __m256 new_x = _mm256_add_ps(x, y);
-            __m256 new_y = _mm256_sub_ps(x, y);
-
-            _mm256_storeu_ps(&data[i], new_x);
-            _mm256_storeu_ps(&data[i + (len / 2)], new_y);
-        }
-    #else
-        std:: cerr << "FhtKacRotator requires AVX512 or AVX2 support!\n";
-        exit(1);
-    #endif
+        simd::kacs_walk(data, len);
     }
 
     void rotate(const float* data, float* rotated_vec) const override {

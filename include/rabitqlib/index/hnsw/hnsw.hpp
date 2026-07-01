@@ -1,7 +1,6 @@
 // HNSW is developed from the [HNSW library](https://github.com/nmslib/hnswlib)
 #pragma once
 
-#include <immintrin.h>
 #include <omp.h>
 
 #include <atomic>
@@ -22,6 +21,7 @@
 #include "rabitqlib/quantization/data_layout.hpp"
 #include "rabitqlib/quantization/rabitq.hpp"
 #include "rabitqlib/utils/buffer.hpp"
+#include "rabitqlib/utils/cpu_features.hpp"
 #include "rabitqlib/utils/rotator.hpp"
 #include "rabitqlib/utils/space.hpp"
 #include "rabitqlib/utils/tools.hpp"
@@ -34,6 +34,24 @@ using maxheap = std::priority_queue<T>;
 
 template <typename T>
 using minheap = std::priority_queue<T, std::vector<T>, std::greater<T>>;
+
+class HierarchicalNSW;
+
+namespace detail {
+
+maxheap<std::pair<float, PID>> search_knn_avx2(
+    HierarchicalNSW&, const float*, size_t
+);
+
+maxheap<std::pair<float, PID>> search_knn_avx512_core(
+    HierarchicalNSW&, const float*, size_t
+);
+
+maxheap<std::pair<float, PID>> search_knn_avx512_popcnt(
+    HierarchicalNSW&, const float*, size_t
+);
+
+}  // namespace detail
 
 class HierarchicalNSW {
    public:
@@ -113,6 +131,16 @@ class HierarchicalNSW {
     };
 
    private:
+    friend maxheap<std::pair<float, PID>> detail::search_knn_avx2(
+        HierarchicalNSW&, const float*, size_t
+    );
+    friend maxheap<std::pair<float, PID>> detail::search_knn_avx512_core(
+        HierarchicalNSW&, const float*, size_t
+    );
+    friend maxheap<std::pair<float, PID>> detail::search_knn_avx512_popcnt(
+        HierarchicalNSW&, const float*, size_t
+    );
+
     static constexpr PID kMaxLabelOperationLock = 65536;
     size_t max_elements_{0};
     mutable std::atomic<size_t> cur_element_count_{0};  // current number of elements
@@ -289,26 +317,28 @@ class HierarchicalNSW {
     }
 
     // ANN Search
-    void get_bin_est(
+    template <class Kernel>
+    void get_bin_est_direct(
         std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
     );
 
-    void get_ex_est(
-        std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
-    ) const;
-
-    void get_full_est(
+    template <class Kernel>
+    void get_full_est_direct(
         std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
     ) const;
 
     maxheap<std::pair<float, PID>> search_knn(const float*, size_t);
 
-    void searchBaseLayerST_AdaptiveRerankOpt(
+    template <class Kernel>
+    maxheap<std::pair<float, PID>> search_knn_direct(const float*, size_t);
+
+    template <class Kernel>
+    void searchBaseLayerST_AdaptiveRerankOptDirect(
         PID ep_id,
         size_t ef,
         size_t TOPK,
         SplitSingleQuery<float>& query_wrapper,
-        std::vector<float>& q_to_centroids,  // preprocess
+        std::vector<float>& q_to_centroids,
         const float* query,
         BoundedKNN& boundedKNN
     );
@@ -973,7 +1003,8 @@ inline void HierarchicalNSW::get_neighbors_by_heuristic2(
     }
 }
 
-inline void HierarchicalNSW::get_bin_est(
+template <class Kernel>
+inline void HierarchicalNSW::get_bin_est_direct(
     std::vector<float>& q_to_centroids,
     SplitSingleQuery<float>& query_wrapper,
     PID currObj,
@@ -982,7 +1013,7 @@ inline void HierarchicalNSW::get_bin_est(
     if (metric_type_ == METRIC_IP) {
         float norm = q_to_centroids[get_clusterid_by_internalid(currObj)];
         float error = q_to_centroids[get_clusterid_by_internalid(currObj) + num_cluster_];
-        split_single_estdist(
+        split_single_estdist_direct<Kernel>(
             get_bindata_by_internalid(currObj),
             query_wrapper,
             padded_dim_,
@@ -995,7 +1026,7 @@ inline void HierarchicalNSW::get_bin_est(
     } else {
         // L2 distance
         float norm = q_to_centroids[get_clusterid_by_internalid(currObj)];
-        split_single_estdist(
+        split_single_estdist_direct<Kernel>(
             get_bindata_by_internalid(currObj),
             query_wrapper,
             padded_dim_,
@@ -1008,28 +1039,8 @@ inline void HierarchicalNSW::get_bin_est(
     }
 }
 
-inline void HierarchicalNSW::get_ex_est(
-    std::vector<float>& q_to_centroids,
-    SplitSingleQuery<float>& query_wrapper,
-    PID currObj,
-    HierarchicalNSW::EstimateRecord& res
-) const {
-    query_wrapper.set_g_add(q_to_centroids[get_clusterid_by_internalid(currObj)]);
-    float est_dist = split_distance_boosting(
-        get_exdata_by_internalid(currObj),
-        ip_func_,
-        query_wrapper,
-        padded_dim_,
-        ex_bits_,
-        res.ip_x0_qr
-    );
-    float low_dist = est_dist - (res.est_dist - res.low_dist) / (1 << ex_bits_);
-    res.est_dist = est_dist;
-    res.low_dist = low_dist;
-    // Note that res.ip_x0_qr becomes invalid after this function.
-}
-
-inline void HierarchicalNSW::get_full_est(
+template <class Kernel>
+inline void HierarchicalNSW::get_full_est_direct(
     std::vector<float>& q_to_centroids,
     SplitSingleQuery<float>& query_wrapper,
     PID currObj,
@@ -1038,7 +1049,7 @@ inline void HierarchicalNSW::get_full_est(
     if (metric_type_ == METRIC_IP) {
         float norm = q_to_centroids[get_clusterid_by_internalid(currObj)];
         float error = q_to_centroids[get_clusterid_by_internalid(currObj) + num_cluster_];
-        split_single_fulldist(
+        split_single_fulldist_direct<Kernel>(
             get_bindata_by_internalid(currObj),
             get_exdata_by_internalid(currObj),
             ip_func_,
@@ -1054,7 +1065,7 @@ inline void HierarchicalNSW::get_full_est(
     } else {
         // L2 distance
         float norm = q_to_centroids[get_clusterid_by_internalid(currObj)];
-        split_single_fulldist(
+        split_single_fulldist_direct<Kernel>(
             get_bindata_by_internalid(currObj),
             get_exdata_by_internalid(currObj),
             ip_func_,
@@ -1094,6 +1105,23 @@ inline std::vector<std::vector<std::pair<float, PID>>> HierarchicalNSW::search(
 }
 
 inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn(
+    const float* rotated_query, size_t TOPK
+) {
+    if (rabitqlib::cpu::has_avx512_popcnt()) {
+        return detail::search_knn_avx512_popcnt(*this, rotated_query, TOPK);
+    }
+    if (rabitqlib::cpu::has_avx512_core() && rabitqlib::cpu::has_avx2()) {
+        return detail::search_knn_avx512_core(*this, rotated_query, TOPK);
+    }
+    if (rabitqlib::cpu::has_avx2()) {
+        return detail::search_knn_avx2(*this, rotated_query, TOPK);
+    }
+
+    throw std::runtime_error("HNSW search requires AVX2/FMA or AVX512 support");
+}
+
+template <class Kernel>
+inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct(
     const float* rotated_query, size_t TOPK
 ) {
     maxheap<std::pair<float, PID>> result;
@@ -1136,7 +1164,7 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn(
     PID curr_obj = enterpoint_node_;
     EstimateRecord curest;
 
-    get_bin_est(q_to_centroids, query_wrapper, curr_obj, curest);
+    get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, curr_obj, curest);
 
     for (int level = maxlevel_; level > 0; level--) {
         bool changed = true;
@@ -1155,7 +1183,7 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn(
                 }
 
                 EstimateRecord candest;
-                get_bin_est(q_to_centroids, query_wrapper, cand, candest);
+                get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, cand, candest);
 
                 if (candest.est_dist < curest.est_dist) {
                     curest = candest;
@@ -1167,7 +1195,7 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn(
     }
 
     BoundedKNN boundedKnn(TOPK);
-    searchBaseLayerST_AdaptiveRerankOpt(
+    searchBaseLayerST_AdaptiveRerankOptDirect<Kernel>(
         curr_obj,
         std::max(ef_, TOPK),
         TOPK,
@@ -1187,13 +1215,13 @@ struct EstimateRecord {
     float low_dist;
 };
 
-// Optimized search function.
-void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
+template <class Kernel>
+inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirect(
     PID ep_id,
     size_t ef,
     size_t TOPK,
     SplitSingleQuery<float>& query_wrapper,
-    std::vector<float>& q_to_centroids,  // preprocess
+    std::vector<float>& q_to_centroids,
     [[maybe_unused]] const float* query,
     BoundedKNN& boundedKNN
 ) {
@@ -1205,7 +1233,7 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
     float distk = 1e10;
 
     EstimateRecord start_estimate_record;
-    get_full_est(q_to_centroids, query_wrapper, ep_id, start_estimate_record);
+    get_full_est_direct<Kernel>(q_to_centroids, query_wrapper, ep_id, start_estimate_record);
     float est_dist = start_estimate_record.est_dist;
     float low_dist = start_estimate_record.low_dist;
 
@@ -1227,14 +1255,19 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
         size_t size = get_list_count((PID*)data);
 
         for (size_t p = 0; p < prefetch_lookahead; ++p) {
-            rabitqlib::memory::mem_prefetch_l1(get_bindata_by_internalid(*(data + 1 + p)), prefetch_size);
+            rabitqlib::memory::mem_prefetch_l1(
+                get_bindata_by_internalid(*(data + 1 + p)), prefetch_size
+            );
         }
         // Iterate over neighbors. (List starts at index 1.)
         for (size_t j = 1; j <= size; j++) {
             int candidate_id = *(data + j);
 
             if (j + prefetch_lookahead <= size) {
-                rabitqlib::memory::mem_prefetch_l1(get_bindata_by_internalid(*(data + j + prefetch_lookahead)), prefetch_size);
+                rabitqlib::memory::mem_prefetch_l1(
+                    get_bindata_by_internalid(*(data + j + prefetch_lookahead)),
+                    prefetch_size
+                );
             }
 
             if(vl->get(candidate_id)) {
@@ -1243,14 +1276,16 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
             vl->set(candidate_id);
 
             EstimateRecord candest;
-            get_bin_est(q_to_centroids, query_wrapper, candidate_id, candest);
+            get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, candidate_id, candest);
 
             bool flag_update_KNNs = boundedKNN.size() < TOPK || candest.low_dist < distk;
 
             if (flag_update_KNNs) {
                 // Compute the full estimate if promising.
                 if (ex_bits_ > 0) {
-                    get_full_est(q_to_centroids, query_wrapper, candidate_id, candest);
+                    get_full_est_direct<Kernel>(
+                        q_to_centroids, query_wrapper, candidate_id, candest
+                    );
                 }
                 Candidate cand{
                     ResultRecord(candest.est_dist, candest.low_dist),

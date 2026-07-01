@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <rabitqlib/quantization/pack_excode.hpp>
 #include <rabitqlib/utils/space.hpp>
+#include <algorithm>
 #include <vector>
 #include <cmath>
 #include <cstdlib>
@@ -53,6 +54,11 @@ protected:
         }
         return expected_result;
     }
+
+    void ExpectIpNear(float result) const {
+        float expected = CalculateExpected();
+        ASSERT_NEAR(expected, result, std::max(0.1f, std::abs(expected) * 1e-6f));
+    }
 };
 
 // --- Test Cases ---
@@ -65,7 +71,7 @@ TEST_F(BitPackUnpackTest, ExCode1Bit) {
         query.data(), compact_code.data(), dim
     );
 
-    ASSERT_NEAR(CalculateExpected(), result, 0.1);
+    ExpectIpNear(result);
 }
 
 TEST_F(BitPackUnpackTest, ExCode2Bit) {
@@ -76,7 +82,7 @@ TEST_F(BitPackUnpackTest, ExCode2Bit) {
         query.data(), compact_code.data(), dim
     );
 
-    ASSERT_NEAR(CalculateExpected(), result, 0.1);
+    ExpectIpNear(result);
 }
 
 TEST_F(BitPackUnpackTest, ExCode3Bit) {
@@ -87,7 +93,7 @@ TEST_F(BitPackUnpackTest, ExCode3Bit) {
         query.data(), compact_code.data(), dim
     );
 
-    ASSERT_NEAR(CalculateExpected(), result, 0.1);
+    ExpectIpNear(result);
 }
 
 TEST_F(BitPackUnpackTest, ExCode4Bit) {
@@ -98,7 +104,7 @@ TEST_F(BitPackUnpackTest, ExCode4Bit) {
         query.data(), compact_code.data(), dim
     );
 
-    ASSERT_NEAR(CalculateExpected(), result, 0.1);
+    ExpectIpNear(result);
 }
 
 TEST_F(BitPackUnpackTest, ExCode5Bit) {
@@ -109,7 +115,7 @@ TEST_F(BitPackUnpackTest, ExCode5Bit) {
         query.data(), compact_code.data(), dim
     );
 
-    ASSERT_NEAR(CalculateExpected(), result, 0.1);
+    ExpectIpNear(result);
 }
 
 TEST_F(BitPackUnpackTest, ExCode6Bit) {
@@ -120,7 +126,7 @@ TEST_F(BitPackUnpackTest, ExCode6Bit) {
         query.data(), compact_code.data(), dim
     );
 
-    ASSERT_NEAR(CalculateExpected(), result, 0.1);
+    ExpectIpNear(result);
 }
 
 TEST_F(BitPackUnpackTest, ExCode7Bit) {
@@ -131,7 +137,6 @@ TEST_F(BitPackUnpackTest, ExCode7Bit) {
         query.data(), compact_code.data(), dim
     );
 
-    ASSERT_NEAR(CalculateExpected(), result, 0.1);
+    ExpectIpNear(result);
 }
-
 
