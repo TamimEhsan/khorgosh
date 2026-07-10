@@ -347,4 +347,12 @@ float ip64_fxu7_avx512(
     return result;
 }
 
+float ip_fxu8_avx512(
+    const float* __restrict__ query, const uint8_t* __restrict__ code, size_t dim
+) {
+    ConstVectorMap<float> query_map(query, dim);
+    ConstVectorMap<uint8_t> code_map(code, dim);
+    return query_map.dot(code_map.cast<float>());
+}
+
 }  // namespace rabitqlib::simd::excode_ipimpl

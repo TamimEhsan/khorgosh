@@ -13,6 +13,7 @@ float ip16_fxu4_avx2(const float* __restrict__ query, const uint8_t* __restrict_
 float ip64_fxu5_avx2(const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim);
 float ip64_fxu6_avx2(const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim);
 float ip64_fxu7_avx2(const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim);
+float ip_fxu8_avx2(const float* __restrict__ query, const uint8_t* __restrict__ code, size_t dim);
 
 float ip16_fxu1_avx512(const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim);
 float ip64_fxu2_avx512(const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim);
@@ -21,6 +22,7 @@ float ip16_fxu4_avx512(const float* __restrict__ query, const uint8_t* __restric
 float ip64_fxu5_avx512(const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim);
 float ip64_fxu6_avx512(const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim);
 float ip64_fxu7_avx512(const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim);
+float ip_fxu8_avx512(const float* __restrict__ query, const uint8_t* __restrict__ code, size_t dim);
 
 }  // namespace excode_ipimpl
 
