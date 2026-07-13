@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -181,6 +182,8 @@ class HierarchicalNSW {
     };
 
     float (*raw_dist_func_)(const float* __restrict__, const float* __restrict__, size_t);
+
+    std::function<float(PID, PID)> dist_func_;
 
     void free_memory() {
         free(data_level0_memory_);
@@ -614,6 +617,9 @@ inline void HierarchicalNSW::construct(
 
     std::cout << "Start HierarchicalNSW construction..." << '\n';
     rawDataPtr_ = data;
+    dist_func_ = [this](PID obj1, PID obj2) { 
+        return get_data_dist(obj1, obj2); 
+    };
     std::cout << "Build edges with non-quantized vectors..." << '\n';
     rabitqlib::ivf::parallel_for(
         0,
@@ -699,7 +705,7 @@ inline void HierarchicalNSW::add_point(
 
     if (static_cast<signed>(curr_obj) != -1) {
         if (curlevel < maxlevelcopy) {
-            float curdist = get_data_dist(curr_obj, cur_c);
+            float curdist = dist_func_(curr_obj, cur_c);
             for (int level = maxlevelcopy; level > curlevel; level--) {
                 bool changed = true;
                 while (changed) {
@@ -715,7 +721,7 @@ inline void HierarchicalNSW::add_point(
                         if (cand > max_elements_) {
                             throw std::runtime_error("cand error");
                         }
-                        float d = get_data_dist(cand, cur_c);
+                        float d = dist_func_(cand, cur_c);
                         if (d < curdist) {
                             curdist = d;
                             curr_obj = cand;
@@ -752,7 +758,7 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_base_layer(
     maxheap<std::pair<float, PID>> top_candidates;
     minheap<std::pair<float, PID>> candidate_set;
 
-    float lower_bound = get_data_dist(ep_id, cur_c);
+    float lower_bound = dist_func_(ep_id, cur_c);
     top_candidates.emplace(lower_bound, ep_id);
     candidate_set.emplace(lower_bound, ep_id);
     vl->set(ep_id);
@@ -807,7 +813,7 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_base_layer(
                 );
             }
 
-            float dist1 = get_data_dist(candidate_id, cur_c);
+            float dist1 = dist_func_(candidate_id, cur_c);
             if (top_candidates.size() < ef_construction_ || lower_bound > dist1) {
                 candidate_set.emplace(dist1, candidate_id);
                 top_candidates.emplace(dist1, candidate_id);
@@ -909,11 +915,11 @@ inline PID HierarchicalNSW::mutually_connect_new_element(
                 data[sz_link_list_other] = cur_c;
                 set_list_count(ll_other, sz_link_list_other + 1);
             } else {
-                float d_max = get_data_dist(selected_neighbor, cur_c);
+                float d_max = dist_func_(selected_neighbor, cur_c);
                 maxheap<std::pair<float, PID>> candidates;
                 candidates.emplace(d_max, cur_c);
                 for (size_t j = 0; j < sz_link_list_other; j++) {
-                    candidates.emplace(get_data_dist(data[j], selected_neighbor), data[j]);
+                    candidates.emplace(dist_func_(data[j], selected_neighbor), data[j]);
                 }
 
                 get_neighbors_by_heuristic2(candidates, max_m);
@@ -957,7 +963,7 @@ inline void HierarchicalNSW::get_neighbors_by_heuristic2(
         bool good = true;
 
         for (std::pair<float, PID> second_pair : return_list) {
-            float curdist = get_data_dist(second_pair.second, current_pair.second);
+            float curdist = dist_func_(second_pair.second, current_pair.second);
             if (curdist < dist_to_query) {
                 good = false;
                 break;
