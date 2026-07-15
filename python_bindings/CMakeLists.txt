@@ -56,7 +56,8 @@ target_include_directories(_rabitqlib BEFORE PRIVATE
 )
 
 # 8. Link OpenMP flags natively
-target_link_libraries(_rabitqlib PRIVATE 
+target_link_libraries(_rabitqlib PRIVATE
+    rabitq_core
     OpenMP::OpenMP_CXX
 )
 
