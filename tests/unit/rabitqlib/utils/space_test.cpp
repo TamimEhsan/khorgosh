@@ -47,9 +47,9 @@ TEST(Select_IP_Func, returns_stable_function_pointer) {
     ip_func = select_excode_ipfunc(8);
     ASSERT_NE(ip_func, nullptr);
     if (cpu::has_avx512_core()) {
-        ASSERT_EQ(ip_func, simd::excode_ipimpl::ip_fxu8_avx512);
+        ASSERT_EQ(ip_func, simd::excode_ipimpl::ip16_fxu8_avx512);
     } else {
-        ASSERT_EQ(ip_func, simd::excode_ipimpl::ip_fxu8_avx2);
+        ASSERT_EQ(ip_func, simd::excode_ipimpl::ip16_fxu8_avx2);
     }
 }
 
@@ -141,14 +141,14 @@ TEST(ip_fxu8_avx, ip_works) {
     ASSERT_NEAR(ip_func(query.data(), codes.data(), dim), expected_float, 0.1F);
     if (cpu::has_avx2()) {
         ASSERT_NEAR(
-            simd::excode_ipimpl::ip_fxu8_avx2(query.data(), codes.data(), dim),
+            simd::excode_ipimpl::ip16_fxu8_avx2(query.data(), codes.data(), dim),
             expected_float,
             0.1F
         );
     }
     if (cpu::has_avx512_core()) {
         ASSERT_NEAR(
-            simd::excode_ipimpl::ip_fxu8_avx512(query.data(), codes.data(), dim),
+            simd::excode_ipimpl::ip16_fxu8_avx512(query.data(), codes.data(), dim),
             expected_float,
             0.1F
         );

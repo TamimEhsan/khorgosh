@@ -29,7 +29,7 @@ ExcodeIpTable resolve_excode_ip_table() {
             excode_ipimpl::ip64_fxu5_avx512,
             excode_ipimpl::ip64_fxu6_avx512,
             excode_ipimpl::ip64_fxu7_avx512,
-            excode_ipimpl::ip_fxu8_avx512,
+            excode_ipimpl::ip16_fxu8_avx512,
         };
     } else if (cpu::has_avx2()) {
         return {
@@ -41,7 +41,7 @@ ExcodeIpTable resolve_excode_ip_table() {
             excode_ipimpl::ip64_fxu5_avx2,
             excode_ipimpl::ip64_fxu6_avx2,
             excode_ipimpl::ip64_fxu7_avx2,
-            excode_ipimpl::ip_fxu8_avx2,
+            excode_ipimpl::ip16_fxu8_avx2,
         };
     } else {
         missing_feature("excode ip functions");
