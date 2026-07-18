@@ -354,7 +354,7 @@ float ip16_fxu8_avx512(
     for (size_t i = 0; i < dim; i += 16) {
         __m128i c8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(code));
         __m512 q = _mm512_loadu_ps(&query[i]);
-        __m512 cf = _mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(c8));
+        __m512 cf = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(c8));
         sum = _mm512_fmadd_ps(cf, q, sum);
         code += 16;
     }

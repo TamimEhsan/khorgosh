@@ -319,7 +319,7 @@ float ip16_fxu8_avx2(
     __m256 sum = _mm256_setzero_ps();
     for (size_t i = 0; i < dim; i += 16) {
         __m128i c8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(code));
-        contribute_ip_signed(c8, &query[i], sum);
+        contribute_ip(c8, &query[i], sum);
         code += 16;
     }
     return mm256_reduce_add_ps(sum);
