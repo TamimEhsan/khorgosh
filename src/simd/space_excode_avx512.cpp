@@ -347,12 +347,18 @@ float ip64_fxu7_avx512(
     return result;
 }
 
-float ip_fxu8_avx512(
+float ip16_fxu8_avx512(
     const float* __restrict__ query, const uint8_t* __restrict__ code, size_t dim
 ) {
-    ConstVectorMap<float> query_map(query, dim);
-    ConstVectorMap<uint8_t> code_map(code, dim);
-    return query_map.dot(code_map.cast<float>());
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < dim; i += 16) {
+        __m128i c8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(code));
+        __m512 q = _mm512_loadu_ps(&query[i]);
+        __m512 cf = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(c8));
+        sum = _mm512_fmadd_ps(cf, q, sum);
+        code += 16;
+    }
+    return _mm512_reduce_add_ps(sum);
 }
 
 }  // namespace rabitqlib::simd::excode_ipimpl
