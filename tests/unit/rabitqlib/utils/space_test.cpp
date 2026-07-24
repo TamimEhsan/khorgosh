@@ -44,7 +44,7 @@ TEST(Select_IP_Func, returns_correct_function_pointer) {
 
     ip_func = select_excode_ipfunc(8);
     ASSERT_NE(ip_func, nullptr);
-    ASSERT_EQ(ip_func, (excode_ipimpl::ip_fxi<float, uint8_t>));
+    ASSERT_EQ(ip_func, excode_ipimpl::ip16_fxu8_avx);
 }
 
 TEST(ip16_fxu1_avx, ip_works) {

@@ -762,15 +762,30 @@ inline float ip64_fxu7_avx(
 }
 
 // inner product between float type and int type vectors
-template <typename TF, typename TI>
-inline TF ip_fxi(const TF* __restrict__ vec0, const TI* __restrict__ vec1, size_t dim) {
-    static_assert(std::is_floating_point_v<TF>, "TF must be an floating type");
-    static_assert(std::is_integral_v<TI>, "TI must be an integeral type");
+inline float ip16_fxu8_avx(
+    const float* __restrict__ query, const uint8_t* __restrict__ code, size_t dim
+) {
+#if defined(__AVX512F__)
+    __m512 sum = _mm512_setzero_ps();
+    for (size_t i = 0; i < dim; i += 16) {
+        __m128i c8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(code));
+        __m512 q = _mm512_loadu_ps(&query[i]);
+        __m512 cf = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(c8));
+        sum = _mm512_fmadd_ps(cf, q, sum);
+        code += 16;
+    }
+    return _mm512_reduce_add_ps(sum);
+#elif defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+    for (size_t i = 0; i < dim; i += 16) {
+        __m128i c8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(code));
+        contribute_ip(c8, &query[i], sum);
+        code += 16;
+    }
+    return mm256_reduce_add_ps(sum);
+#endif
+} 
 
-    ConstVectorMap<TF> v0(vec0, dim);
-    ConstVectorMap<TI> v1(vec1, dim);
-    return v0.dot(v1.template cast<TF>());
-}
 }  // namespace excode_ipimpl
 
 using ex_ipfunc = float (*)(const float*, const uint8_t*, size_t);
@@ -799,7 +814,7 @@ inline ex_ipfunc select_excode_ipfunc(size_t ex_bits) {
         return excode_ipimpl::ip64_fxu7_avx;
     }
     if (ex_bits == 8) {
-        return excode_ipimpl::ip_fxi;
+        return excode_ipimpl::ip16_fxu8_avx;
     }
 
     std::cerr << "Bad IP function for IVF\n";
