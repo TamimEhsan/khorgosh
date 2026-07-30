@@ -223,6 +223,7 @@ static inline float hnsw_warmup_ip_x0_q_512_avx512_8(
     for (; i < dim_end_64; i += 64) {
         // 1. Load 64 dimensions of the 1-bit database to use directly as a mask
         __mmask64 db_mask = *data;
+        db_mask = ~db_mask; // Inverts all 64 bits
         data++;
 
         // 2. Load 64 dimensions (64 bytes) of the 8-bit query
@@ -240,19 +241,17 @@ static inline float hnsw_warmup_ip_x0_q_512_avx512_8(
 
         // 5. Add to the master 64-bit accumulators
         acc_ip = _mm512_add_epi64(acc_ip, byte_sums);
-        float ip_scalar = static_cast<float>(_mm512_reduce_add_epi64(acc_ip));
-        if (delta * ip_scalar > target) {
-            // std::cout << "Early exit in warmup_ip_x0_q_512_avx512_8: delta * ip_scalar = " << delta * ip_scalar << " > target = " << target << std::endl;
-            // exit(1);
-            early_exit_count[i / 64]++;
-            return (delta * ip_scalar);
+        size_t ip_scalar = static_cast<float>(_mm512_reduce_add_epi64(acc_ip));
+        if(  ip_scalar * delta > target){
+            early_exit_count[i/64]++;
+            return ip_scalar;
         }
     }
 
     // Reduce the eight 64-bit accumulators down to a single scalar
     size_t ip_scalar = static_cast<size_t>(_mm512_reduce_add_epi64(acc_ip));
 
-    return (delta * static_cast<float>(ip_scalar));
+    return static_cast<float>(ip_scalar);
 }
 
 static inline float hnsw_warmup_ip_x0_q_512_avx512(

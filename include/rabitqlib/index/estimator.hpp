@@ -10,6 +10,8 @@
 #include "rabitqlib/utils/space.hpp"
 #include "rabitqlib/utils/warmup_space.hpp"
 
+inline int default_objects = 0;
+
 namespace rabitqlib {
 /**
  * @brief Use FastScan to estimate batch distance
@@ -256,28 +258,35 @@ inline void split_single_estdist_direct(
     float target = 0.0f
 ) {
     ConstBinDataMap<float> cur_bin(bin_data, padded_dim);
+    float delta = cur_bin.f_rescale() * q_obj.delta();
+    float vl = cur_bin.f_add() + g_add + cur_bin.f_rescale() * (q_obj.vl() * cur_bin.f_popcount() + q_obj.k1xsumq()) + delta * q_obj.g_sumq();
+    delta = -delta;
+
     float target_ip_x0_qr = 0;
     if (target > 0) {
-        target_ip_x0_qr =
-            (target - cur_bin.f_add() - g_add) / cur_bin.f_rescale() -
-            q_obj.k1xsumq() - (q_obj.vl() * cur_bin.f_popcount());
+        target_ip_x0_qr = target - vl;
     } else {
         target_ip_x0_qr = std::numeric_limits<float>::max();
     }
-
+   
     ip_x0_qr = Kernel::warmup_ip_x0_q_512(
         cur_bin.bin_code(),
         q_obj.query_bin(),
-        q_obj.delta(),
+        delta,
         target_ip_x0_qr,
         padded_dim,
         q_obj.num_bits()
     );
 
-    est_dist =
-        cur_bin.f_add() + g_add + (cur_bin.f_rescale() * (ip_x0_qr + q_obj.vl()*cur_bin.f_popcount() + q_obj.k1xsumq()));
+    
+    est_dist = vl +  delta * ip_x0_qr ;
 
     low_dist = est_dist - (cur_bin.f_error() * g_error);
+
+    // if( target < est_dist and target_ip_x0_qr > ip_x0_qr ) {
+    //     std::cout<<"Something is wrong in warmup_ip_x0_q_512, target_ip_x0_qr = "<<target_ip_x0_qr<<" < ip_x0_qr = "<<ip_x0_qr<<std::endl;
+    //     exit(1);
+    // }
 };
 
 }  // namespace rabitqlib

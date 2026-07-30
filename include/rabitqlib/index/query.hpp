@@ -117,6 +117,8 @@ class SplitSingleQuery {
     T G_add_;
     T G_k1xSumq_;
     T G_kbxSumq_;
+    // sum of the quantized query values
+    T G_sumq_;
     T G_error_;
     T delta_;
     T vl_;
@@ -154,6 +156,11 @@ class SplitSingleQuery {
             quant_query.data(), QueryBin_.data(), padded_dim, kNumBits
         );
 
+        // sum the quantized query values to compute G_sumq_
+        G_sumq_ = std::accumulate(
+            quant_query.begin(), quant_query.end(), static_cast<T>(0)
+        );
+
         // new_transpose_bin_512 already stores the query in the bit-plane/chunk
         // layout consumed by warmup_ip_x0_q_512.
     }
@@ -175,6 +182,8 @@ class SplitSingleQuery {
     [[nodiscard]] T g_add() const { return G_add_; }
 
     [[nodiscard]] T g_error() const { return G_error_; }
+
+    [[nodiscard]] T g_sumq() const { return G_sumq_; }
 
     void set_g_add(T norm, T ip = 0) {
         if (metric_type_ == METRIC_L2) {

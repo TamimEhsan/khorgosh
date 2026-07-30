@@ -29,7 +29,7 @@
 
 
 extern int early_exit_count[20];
-
+extern int default_objects;
 
 namespace rabitqlib::hnsw {
 
@@ -1172,13 +1172,16 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct(
 
     get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, curr_obj, curest);
 
-    for (int level = maxlevel_; level > 0; level--) {
+    for (int level = maxlevel_; level >= 0; level--) {
         bool changed = true;
         while (changed) {
             changed = false;
             unsigned int* data;
-
-            data = static_cast<unsigned int*>(get_linklist(curr_obj, level));
+            if(level == 0) {
+                data = static_cast<unsigned int*>(get_linklist0(curr_obj));
+            } else {
+                data = static_cast<unsigned int*>(get_linklist(curr_obj, level));
+            }
             int size = get_list_count(data);
 
             PID* datal = static_cast<PID*>(data + 1);
@@ -1258,6 +1261,10 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirect(
         early_exit_count[i]=0;
     }
 
+    int positive_objects = 0;
+    int negative_objects = 0;
+    default_objects = 0;
+
     while (candidate_set.has_next()) {
         // Step 1 - get the next node to explore.
         PID current_node_id = candidate_set.pop();
@@ -1287,11 +1294,12 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirect(
 
             EstimateRecord candest;
             float mx = candidate_set.top_dist();
-            if( std::fabs(mx -std::numeric_limits<float>::max()) < 1e-6 ) {
-                get_full_est_direct<Kernel>(q_to_centroids, query_wrapper, candidate_id, candest);
+            if( std::fabs(mx -std::numeric_limits<float>::max()) < 1 ) {
+                get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, candidate_id, candest);
             } else {
                 get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, candidate_id, candest, mx);
             }
+            // get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, candidate_id, candest);
 
             bool flag_update_KNNs = boundedKNN.size() < TOPK || candest.low_dist < distk;
 
@@ -1312,6 +1320,9 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirect(
 
             if (!candidate_set.is_full(candest.est_dist)) {
                 candidate_set.insert(candidate_id, candest.est_dist);
+                positive_objects++;
+            } else {
+                negative_objects++;
             }
 
             rabitqlib::memory::mem_prefetch_l2(
@@ -1322,12 +1333,13 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirect(
 
     std::cout<<"early_exit_count: "<<std::endl;
     int saved = 0;
-    for(int i=0;i<14;i++){
+    for(int i=0;i<15;i++){
         std::cout<<early_exit_count[i]<<" ";
         saved += early_exit_count[i]*(15-i-1);
     }
     std::cout<<std::endl;
     std::cout << "Saved iterations: " << saved << std::endl;
+    std::cout << "Positive objects: " << positive_objects << " " << "Negative objects: " << negative_objects << " " << "Default objects: " << default_objects << std::endl;
 
     visited_list_pool_->release_vis_list(vl);
 }
