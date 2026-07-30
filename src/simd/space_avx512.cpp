@@ -75,7 +75,7 @@ void new_transpose_bin_avx512(
     }
 }
 
-void new_transpose_bin_512_avx512(
+void new_transpose_bin_512_avx512_1_7(
     const uint8_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
 ) {
     // Keep full 512-dim blocks as 8 chunks, but store the tail as compact
@@ -100,6 +100,73 @@ void new_transpose_bin_512_avx512(
 
         i += block_size;
         tq += num_chunks * b_query;
+    }
+}
+
+void new_transpose_bin_512_avx512_8(
+    const uint8_t* q, uint64_t* tq64, size_t padded_dim
+) {
+    auto tq = reinterpret_cast<uint8_t*>(tq64);
+    
+    // 1. Mask to reverse bytes strictly WITHIN each 64-bit block.
+    // The first 8 bytes stay in the lower 64 bits, the next 8 stay in the upper.
+    __m512i shuf_mask = _mm512_broadcast_i32x4(
+        _mm_setr_epi8(
+            7, 6, 5, 4, 3, 2, 1, 0,       // Reverse lower 64-bit block
+            15, 14, 13, 12, 11, 10, 9, 8  // Reverse upper 64-bit block
+        )
+    );
+    
+    // 2. Mask to reverse the eight 64-bit blocks across the full 512-bit register
+    __m512i permute_mask = _mm512_setr_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+
+    size_t i = 0;
+    size_t end_64 = (padded_dim / 64) * 64;
+    
+    for (; i < end_64; i += 64) {
+        __m512i vec = _mm512_loadu_si512(q + i);
+        
+        // State 1: Every 64-bit chunk is internally byte-reversed, 
+        // but the chunks themselves have NOT moved.
+        __m512i byte_reversed = _mm512_shuffle_epi8(vec, shuf_mask);
+        
+        // State 2: Now we safely flip the order of the 64-bit chunks across the register.
+        __m512i fully_reversed = _mm512_permutexvar_epi64(permute_mask, byte_reversed);
+        
+        _mm512_storeu_si512(tq + i, fully_reversed);
+    }
+
+}
+
+void new_transpose_bin_512_8_scalar(
+    const uint8_t* q, uint64_t* tq64, size_t padded_dim
+) {
+    auto tq = reinterpret_cast<uint8_t*>(tq64);
+    
+    // Process in 64-byte blocks
+    for (size_t i = 0; i < padded_dim; i += 64) {
+        // Reverse every individual byte to align with a bit-reversed 64-bit mask
+        for(int j = 0; j < 64; ++j) {
+            // If i+j exceeds padded_dim in the tail, you may need a bounds check here
+            tq[i + j] = q[i + (63 - j)]; 
+        }
+    }
+}
+
+void new_transpose_bin_512_avx512(
+    const uint8_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
+) {
+    // for b query in [1, 7], use new_transpose_bin_512_avx512_1_7
+    if (b_query >= 1 && b_query < 8) {
+        new_transpose_bin_512_avx512_1_7(q, tq, padded_dim, b_query);
+        return;
+    } else if (b_query == 8) {
+        new_transpose_bin_512_avx512_8(q, tq, padded_dim);
+        return;
+    } else {
+        std::cerr << "Error: b_query must be in the range [1, 8] for new_transpose_bin_512_avx512." << std::endl;
+        std::exit(EXIT_FAILURE);
+        return;
     }
 }
 

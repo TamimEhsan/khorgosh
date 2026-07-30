@@ -9,8 +9,9 @@ from utils import read_fvecs, read_ivecs, compute_recall
 # ──────────────────────────────────────────────
 TOPK        = 10              # top-k results
 NUM_THREADS = 1               #number of threads
-EFS         = [10, 20, 40, 80, 120, 200, 400, 600, 800, 1000, 1500, 2000]
-TEST_ROUNDS = 3
+# EFS         = [10, 20, 40, 80, 120, 200, 400, 600, 800, 1000, 1500, 2000]
+EFS        = [200, 600, 1000, 2000]
+TEST_ROUNDS = 1
 # ──────────────────────────────────────────────
 
 
@@ -19,7 +20,13 @@ def main(args=None) -> None:
     queries = read_fvecs(args.query_file)
     gt      = read_ivecs(args.gt_file)
     nq      = queries.shape[0]
-    print(f"Queries: {queries.shape}, GT: {gt.shape}")
+
+    # original_dim = 960
+    # target_dim = 128  # Target dimension for JL transform
+    # query_projector = StandaloneProjector(target_dim=target_dim)
+    # query_projector.load("my_leanvec_projection")   
+    # queries = query_projector.transform(queries)
+    # print(f"Queries: {queries.shape}, GT: {gt.shape}")
 
     # 2. Load index
     idx = HnswIndex.load(args.index_file)

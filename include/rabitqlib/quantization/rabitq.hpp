@@ -149,6 +149,7 @@ inline void quantize_compact_one_bit(
         cur_bin_data.f_add(),
         cur_bin_data.f_rescale(),
         cur_bin_data.f_error(),
+        cur_bin_data.f_popcount(),
         metric_type
     );
 }
@@ -164,8 +165,9 @@ inline void quantize_compact_one_bit(
     T& ferror,
     MetricType metric_type = METRIC_L2
 ) {
+    T f_popcount_dummy;
     rabitq_impl::one_bit::one_bit_compact_code(
-        data, centroid, padded_dim, compact_code, f_add, f_rescale, ferror, metric_type
+        data, centroid, padded_dim, compact_code, f_add, f_rescale, ferror, f_popcount_dummy, metric_type
     );
 }
 
@@ -180,6 +182,7 @@ inline void quantize_compact_one_bit(
     MetricType metric_type = METRIC_L2
 ) {
     std::vector<T> centroid(padded_dim, 0);
+    T f_popcount_dummy;
     rabitq_impl::one_bit::one_bit_compact_code(
         data,
         centroid.data(),
@@ -188,6 +191,7 @@ inline void quantize_compact_one_bit(
         f_add,
         f_rescale,
         ferror,
+        f_popcount_dummy,
         metric_type
     );
 }

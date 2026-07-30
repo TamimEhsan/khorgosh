@@ -80,6 +80,7 @@ inline void one_bit_code_with_factor(
     T& f_add,
     T& f_rescale,
     T& f_error,
+    T& f_popcount,
     MetricType metric_type = METRIC_L2
 ) {
     // quantize
@@ -90,6 +91,7 @@ inline void one_bit_code_with_factor(
     RowMajorArrayMap<int> x_u(binary_code, 1, static_cast<long>(dim));
     RowMajorArray<T> xu_cb = x_u.template cast<T>() + cb;
 
+    f_popcount = static_cast<T>(x_u.sum());
     // distance to centroid
     T l2_sqr = l2norm_sqr<T>(residual_arr.data(), dim);
     T l2_norm = std::sqrt(l2_sqr);
@@ -165,6 +167,7 @@ inline void one_bit_compact_code(
     T& f_add,
     T& f_recale,
     T& f_error,
+    T& f_popcount,
     MetricType metric_type = METRIC_L2
 ) {
     // binary code
@@ -179,6 +182,7 @@ inline void one_bit_compact_code(
         f_add,
         f_recale,
         f_error,
+        f_popcount,
         metric_type
     );
 
@@ -202,6 +206,7 @@ inline void one_bit_compact_codes(
 
 #pragma omp parallel for if (Parallel)
     for (size_t i = 0; i < num; ++i) {
+        T f_popcount_dummy;
         one_bit_compact_code(
             data + (padded_dim * i),
             centroid,
@@ -210,6 +215,7 @@ inline void one_bit_compact_codes(
             f_add[i],
             f_rescale[i],
             f_error[i],
+            f_popcount_dummy,
             metric_type
         );
     }

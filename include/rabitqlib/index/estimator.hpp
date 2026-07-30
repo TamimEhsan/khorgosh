@@ -252,21 +252,30 @@ inline void split_single_estdist_direct(
     float& est_dist,
     float& low_dist,
     float g_add = 0,
-    float g_error = 0
+    float g_error = 0,
+    float target = 0.0f
 ) {
     ConstBinDataMap<float> cur_bin(bin_data, padded_dim);
+    float target_ip_x0_qr = 0;
+    if (target > 0) {
+        target_ip_x0_qr =
+            (target - cur_bin.f_add() - g_add) / cur_bin.f_rescale() -
+            q_obj.k1xsumq() - (q_obj.vl() * cur_bin.f_popcount());
+    } else {
+        target_ip_x0_qr = std::numeric_limits<float>::max();
+    }
 
     ip_x0_qr = Kernel::warmup_ip_x0_q_512(
         cur_bin.bin_code(),
         q_obj.query_bin(),
         q_obj.delta(),
-        q_obj.vl(),
+        target_ip_x0_qr,
         padded_dim,
         q_obj.num_bits()
     );
 
     est_dist =
-        cur_bin.f_add() + g_add + (cur_bin.f_rescale() * (ip_x0_qr + q_obj.k1xsumq()));
+        cur_bin.f_add() + g_add + (cur_bin.f_rescale() * (ip_x0_qr + q_obj.vl()*cur_bin.f_popcount() + q_obj.k1xsumq()));
 
     low_dist = est_dist - (cur_bin.f_error() * g_error);
 };

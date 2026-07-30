@@ -27,10 +27,6 @@
 #include "rabitqlib/utils/tools.hpp"
 #include "rabitqlib/utils/visited_pool.hpp"
 
-
-extern int early_exit_count[20];
-
-
 namespace rabitqlib::hnsw {
 
 template <typename T>
@@ -323,7 +319,7 @@ class HierarchicalNSW {
     // ANN Search
     template <class Kernel>
     void get_bin_est_direct(
-        std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&, float target_dist = 0
+        std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
     );
 
     template <class Kernel>
@@ -344,7 +340,9 @@ class HierarchicalNSW {
         SplitSingleQuery<float>& query_wrapper,
         std::vector<float>& q_to_centroids,
         const float* query,
-        BoundedKNN& boundedKNN
+        BoundedKNN& boundedKNN,
+        HashBasedBooleanSet* vl,
+        buffer::SearchBuffer<float> candidate_set
     );
 
     // Construction
@@ -1012,8 +1010,7 @@ inline void HierarchicalNSW::get_bin_est_direct(
     std::vector<float>& q_to_centroids,
     SplitSingleQuery<float>& query_wrapper,
     PID currObj,
-    HierarchicalNSW::EstimateRecord& res,
-    float target_dist
+    HierarchicalNSW::EstimateRecord& res
 ) {
     if (metric_type_ == METRIC_IP) {
         float norm = q_to_centroids[get_clusterid_by_internalid(currObj)];
@@ -1039,8 +1036,7 @@ inline void HierarchicalNSW::get_bin_est_direct(
             res.est_dist,
             res.low_dist,
             norm * norm,
-            norm,
-            target_dist
+            norm
         );
     }
 }
@@ -1172,35 +1168,72 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct(
 
     get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, curr_obj, curest);
 
-    for (int level = maxlevel_; level > 0; level--) {
+    // const size_t prefetch_size = (((padded_dim_ / 8) + 63) / 64) + 1;
+    // const size_t prefetch_lookahead = 4;  // Number of neighbors to prefetch in advance
+    float distk = 1e9f;
+    size_t ef = std::max(ef_, TOPK);
+    HashBasedBooleanSet* vl = visited_list_pool_->get_free_vislist();
+    buffer::SearchBuffer<float> candidate_set(ef);
+    BoundedKNN boundedKNN(TOPK);
+
+    for (int level = maxlevel_; level >= 0; level--) {
         bool changed = true;
         while (changed) {
             changed = false;
             unsigned int* data;
-
-            data = static_cast<unsigned int*>(get_linklist(curr_obj, level));
+            
+            if (level == 0) {
+                data = static_cast<unsigned int*>(get_linklist0(curr_obj));
+            } else {
+                data = static_cast<unsigned int*>(get_linklist(curr_obj, level));
+            }
+            
             int size = get_list_count(data);
 
-            PID* datal = static_cast<PID*>(data + 1);
-            for (int i = 0; i < size; i++) {
-                PID cand = datal[i];
-                if (cand > max_elements_) {
-                    throw std::runtime_error("cand error");
+            for (int i = 1; i <= size; i++) {
+                PID candidate_id = data[i];
+                if (candidate_id >= max_elements_) {
+                    throw std::runtime_error("candidate_id error");
                 }
 
+                if(vl->get(candidate_id)) {
+                    continue;
+                }
+                vl->set(candidate_id);
+
                 EstimateRecord candest;
-                get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, cand, candest);
+                get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, candidate_id, candest);
+
+                bool flag_update_KNNs = boundedKNN.size() < TOPK || candest.low_dist < distk;
+
+                if (flag_update_KNNs) {
+                    // Compute the full estimate if promising.
+                    if (ex_bits_ > 0) {
+                        get_full_est_direct<Kernel>(
+                            q_to_centroids, query_wrapper, candidate_id, candest
+                        );
+                    }
+                    Candidate cand{
+                        ResultRecord(candest.est_dist, candest.low_dist),
+                        static_cast<PID>(candidate_id)
+                    };
+                    boundedKNN.insert(cand);
+                    distk = boundedKNN.worst().record.est_dist;
+                }
+
+                if (!candidate_set.is_full(candest.est_dist)) {
+                    candidate_set.insert(candidate_id, candest.est_dist);
+                }
 
                 if (candest.est_dist < curest.est_dist) {
                     curest = candest;
-                    curr_obj = cand;
+                    curr_obj = candidate_id;
                     changed = true;
                 }
             }
         }
     }
 
-    BoundedKNN boundedKnn(TOPK);
     searchBaseLayerST_AdaptiveRerankOptDirect<Kernel>(
         curr_obj,
         std::max(ef_, TOPK),
@@ -1208,9 +1241,11 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct(
         query_wrapper,
         q_to_centroids,
         rotated_query,
-        boundedKnn
+        boundedKNN,
+        vl,
+        candidate_set
     );
-    for (auto& candidate : boundedKnn.candidates()) {
+    for (auto& candidate : boundedKNN.candidates()) {
         result.emplace(candidate.record.est_dist, get_external_label(candidate.id));
     }
     return result;
@@ -1229,34 +1264,32 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirect(
     SplitSingleQuery<float>& query_wrapper,
     std::vector<float>& q_to_centroids,
     [[maybe_unused]] const float* query,
-    BoundedKNN& boundedKNN
+    BoundedKNN& boundedKNN,
+    HashBasedBooleanSet* vl,
+    buffer::SearchBuffer<float> candidate_set
 ) {
-    HashBasedBooleanSet* vl = visited_list_pool_->get_free_vislist();
+    // HashBasedBooleanSet* vl = visited_list_pool_->get_free_vislist();
 
     // Use our bounded priority queue instead of the maxheap.
-    buffer::SearchBuffer<float> candidate_set(ef);
+    // buffer::SearchBuffer<float> candidate_set(ef);
 
-    float distk = 1e10;
+    float distk = boundedKNN.worst().record.est_dist;
 
-    EstimateRecord start_estimate_record;
-    get_full_est_direct<Kernel>(q_to_centroids, query_wrapper, ep_id, start_estimate_record);
-    float est_dist = start_estimate_record.est_dist;
-    float low_dist = start_estimate_record.low_dist;
+    // EstimateRecord start_estimate_record;
+    // get_full_est_direct<Kernel>(q_to_centroids, query_wrapper, ep_id, start_estimate_record);
+    // float est_dist = start_estimate_record.est_dist;
+    // float low_dist = start_estimate_record.low_dist;
 
-    // Insert initial candidate.
-    boundedKNN.insert({ResultRecord(est_dist, low_dist), ep_id});
-    candidate_set.insert(ep_id, est_dist);
+    // // Insert initial candidate.
+    // boundedKNN.insert({ResultRecord(est_dist, low_dist), ep_id});
+    // candidate_set.insert(ep_id, est_dist);
 
-    distk = est_dist;
+    // distk = est_dist;
 
-    vl->set(ep_id);
+    // vl->set(ep_id);
 
     const size_t prefetch_size = (((padded_dim_ / 8) + 63) / 64) + 1;
     const size_t prefetch_lookahead = 4;  // Number of neighbors to prefetch in advance.
-
-    for(int i=0;i<20;i++){
-        early_exit_count[i]=0;
-    }
 
     while (candidate_set.has_next()) {
         // Step 1 - get the next node to explore.
@@ -1286,12 +1319,7 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirect(
             vl->set(candidate_id);
 
             EstimateRecord candest;
-            float mx = candidate_set.top_dist();
-            if( std::fabs(mx -std::numeric_limits<float>::max()) < 1e-6 ) {
-                get_full_est_direct<Kernel>(q_to_centroids, query_wrapper, candidate_id, candest);
-            } else {
-                get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, candidate_id, candest, mx);
-            }
+            get_bin_est_direct<Kernel>(q_to_centroids, query_wrapper, candidate_id, candest);
 
             bool flag_update_KNNs = boundedKNN.size() < TOPK || candest.low_dist < distk;
 
@@ -1319,15 +1347,6 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirect(
             );
         }
     }
-
-    std::cout<<"early_exit_count: "<<std::endl;
-    int saved = 0;
-    for(int i=0;i<14;i++){
-        std::cout<<early_exit_count[i]<<" ";
-        saved += early_exit_count[i]*(15-i-1);
-    }
-    std::cout<<std::endl;
-    std::cout << "Saved iterations: " << saved << std::endl;
 
     visited_list_pool_->release_vis_list(vl);
 }

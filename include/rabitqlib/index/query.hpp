@@ -123,7 +123,7 @@ class SplitSingleQuery {
     MetricType metric_type_ = METRIC_L2;
 
    public:
-    static constexpr size_t kNumBits = 4;
+    static constexpr size_t kNumBits = 8;
     explicit SplitSingleQuery(
         const T* rotated_query,
         size_t padded_dim,
