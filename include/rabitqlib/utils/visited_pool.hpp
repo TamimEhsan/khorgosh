@@ -12,7 +12,7 @@ class VisitedListPool {
 
    public:
     VisitedListPool(size_t initpoolsize, size_t max_elements) {
-        numelements_ = max_elements / 10;
+        numelements_ = max_elements;
         for (size_t i = 0; i < initpoolsize; i++) {
             pool_.push_front(new HashBasedBooleanSet(numelements_));
         }

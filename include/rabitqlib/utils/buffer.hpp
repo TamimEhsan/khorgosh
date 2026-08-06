@@ -43,16 +43,35 @@ class SearchBuffer {
     explicit SearchBuffer(size_t capacity) : data_(capacity + 1), capacity_(capacity) {}
 
     // insert a data point into buffer
-    void insert(PID data_id, T dist) {
-        if (is_full(dist)) {
+    // insert a data point into buffer
+    inline void insert(PID data_id, T dist) {
+        // 1. Inlined fast rejection (Eliminates is_full overhead)
+        if (size_ == capacity_ && dist >= data_[size_ - 1].distance) {
             return;
         }
 
-        size_t lo = binary_search(dist);
-        std::memmove(&data_[lo + 1], &data_[lo], (size_ - lo) * sizeof(AnnCandidate<T>));
-        data_[lo] = AnnCandidate<T>(data_id, dist);
-        size_ += static_cast<size_t>(size_ < capacity_);
-        cur_ = lo < cur_ ? lo : cur_;
+        // 2. Setup bounds
+        size_t i = size_;
+        if (i < capacity_) {
+            size_++;
+        } else {
+            i = capacity_ - 1; // Overwrite the worst element
+        }
+
+        // 3. Combined Reverse Search + Shift
+        // Eliminates binary_search stalls and memmove overhead.
+        // In HNSW, this loop usually runs only 0 to 3 times per insertion!
+        AnnCandidate<T>* ptr = data_.data();
+        while (i > 0 && ptr[i - 1].distance > dist) {
+            ptr[i] = ptr[i - 1];
+            i--;
+        }
+        
+        ptr[i] = AnnCandidate<T>(data_id, dist);
+
+        if (i < cur_) {
+            cur_ = i;
+        }
     }
 
     // get unchecked candidate with minimum distance

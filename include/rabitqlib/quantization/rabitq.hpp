@@ -331,7 +331,7 @@ inline void quantize_scalar(
     ScalarQuantizerType scalar_quantizer_type = ScalarQuantizerType::RECONSTRUCTION
 ) {
     std::vector<T> centroid(dim, 0);
-    rabitq_impl::total_bits::rabitq_scalar_impl<T, TP>(
+    rabitq_impl::total_bits::rabitq_scalar_impl_avx512(
         data,
         centroid.data(),
         dim,

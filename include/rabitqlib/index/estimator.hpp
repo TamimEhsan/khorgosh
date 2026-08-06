@@ -199,7 +199,7 @@ inline void split_single_estdist(
 ) {
     ConstBinDataMap<float> cur_bin(bin_data, padded_dim);
 
-    ip_x0_qr = warmup_ip_x0_q_512(
+    ip_x0_qr = warmup_ip_x0_q_512<q_obj.kNumBits>(
         cur_bin.bin_code(),
         q_obj.query_bin(),
         q_obj.delta(),

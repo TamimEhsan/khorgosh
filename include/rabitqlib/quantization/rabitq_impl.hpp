@@ -582,6 +582,112 @@ static inline void rabitq_scalar_impl(
     vl = delta * cb;
 }
 
+static inline void rabitq_scalar_impl_avx512(
+    const float* data,
+    const float* centroid,
+    size_t dim,
+    size_t total_bits,
+    uint8_t* total_code,
+    float& delta,
+    float& vl,
+    double t_const = -1.0,
+    ScalarQuantizerType scalar_quantizer_type = ScalarQuantizerType::RECONSTRUCTION
+) {
+    size_t ex_bits = total_bits - 1;
+    float cb = -(static_cast<float>(1 << ex_bits) - 0.5f);
+
+    std::vector<float> residuals(dim);
+    
+    // ---------------------------------------------------------
+    // PASS 1: Compute Residuals & Norms
+    // ---------------------------------------------------------
+    __m512 v_norm_data_sq = _mm512_setzero_ps();
+    
+    // Exact loop constraint - no scalar tail needed
+    for (size_t i = 0; i < dim; i += 16) {
+        // Note: If 'data' and 'centroid' are 64-byte aligned, 
+        // change _mm512_loadu_ps to _mm512_load_ps
+        __m512 v_d = _mm512_loadu_ps(&data[i]);
+        __m512 v_c = _mm512_loadu_ps(&centroid[i]);
+        
+        __m512 v_res = _mm512_sub_ps(v_d, v_c);
+        
+        // _mm512_store_ps can be used here since std::vector<float> 
+        // might not be strictly 64-byte aligned by default depending on the allocator, 
+        // but loadu/storeu is perfectly safe and fast on modern architectures.
+        _mm512_storeu_ps(&residuals[i], v_res);
+        
+        v_norm_data_sq = _mm512_fmadd_ps(v_res, v_res, v_norm_data_sq);
+    }
+    
+    float norm_data_sq = _mm512_reduce_add_ps(v_norm_data_sq);
+    float norm_data = std::sqrt(norm_data_sq);
+    float inv_norm = (norm_data > 0.0f) ? (1.0f / norm_data) : 1.0f;
+
+    // ---------------------------------------------------------
+    // PASS 2: Fused Quantization, Coding, & Stats
+    // ---------------------------------------------------------
+    __m512 v_inv_norm = _mm512_set1_ps(inv_norm);
+    __m512 v_t_const  = _mm512_set1_ps(static_cast<float>(t_const));
+    __m512 v_kEps     = _mm512_set1_ps(1e-5f);
+    __m512i v_mask_ex = _mm512_set1_epi32((1 << ex_bits) - 1);
+    __m512 v_cb       = _mm512_set1_ps(cb);
+
+    __m512 v_norm_quan_sq = _mm512_setzero_ps();
+    __m512 v_dot_prod     = _mm512_setzero_ps();
+
+    // Exact loop constraint - no scalar tail needed
+    for (size_t i = 0; i < dim; i += 16) {
+        __m512 v_res = _mm512_loadu_ps(&residuals[i]);
+
+        __m512 v_abs_res    = _mm512_abs_ps(v_res);
+        __m512 v_normed_abs = _mm512_mul_ps(v_abs_res, v_inv_norm);
+        __m512 v_tmp_f      = _mm512_fmadd_ps(v_t_const, v_normed_abs, v_kEps);
+
+        __m512i v_tmp_i = _mm512_cvttps_epi32(v_tmp_f); 
+        v_tmp_i = _mm512_min_epi32(v_tmp_i, v_mask_ex);
+
+        __mmask16 m_neg = _mm512_cmp_ps_mask(v_res, _mm512_setzero_ps(), _CMP_LT_OQ);
+        __m512i v_not_tmp = _mm512_and_epi32(_mm512_xor_epi32(v_tmp_i, _mm512_set1_epi32(-1)), v_mask_ex);
+        v_tmp_i = _mm512_mask_blend_epi32(m_neg, v_tmp_i, v_not_tmp);
+
+        __mmask16 m_pos = _mm512_cmp_ps_mask(v_res, _mm512_setzero_ps(), _CMP_GT_OQ);
+        __m512i v_bin_shifted = _mm512_maskz_set1_epi32(m_pos, 1 << ex_bits);
+
+        __m512i v_tc_32 = _mm512_or_epi32(v_tmp_i, v_bin_shifted);
+
+        // Pack down to uint8_t and store
+        // Note: If total_code is 64-byte aligned, use _mm_store_si128
+        __m128i v_tc_8 = _mm512_cvtepi32_epi8(v_tc_32);
+        _mm_storeu_si128((__m128i*)&total_code[i], v_tc_8);
+
+        __m512 v_tc_f = _mm512_cvtepi32_ps(v_tc_32);
+        __m512 v_ucb  = _mm512_add_ps(v_tc_f, v_cb);
+
+        v_norm_quan_sq = _mm512_fmadd_ps(v_ucb, v_ucb, v_norm_quan_sq);
+        v_dot_prod     = _mm512_fmadd_ps(v_res, v_ucb, v_dot_prod);
+    }
+
+    float norm_quan_sq = _mm512_reduce_add_ps(v_norm_quan_sq);
+    float dot_prod     = _mm512_reduce_add_ps(v_dot_prod);
+
+    // ---------------------------------------------------------
+    // Final Mathematics
+    // ---------------------------------------------------------
+    float norm_quan = std::sqrt(norm_quan_sq);
+    float cos_similarity = dot_prod / (norm_data * norm_quan);
+
+    if (scalar_quantizer_type == ScalarQuantizerType::RECONSTRUCTION) {
+        delta = (norm_data / norm_quan) * cos_similarity;
+    } else if (scalar_quantizer_type == ScalarQuantizerType::UNBIASED_ESTIMATION) {
+        delta = (norm_data / norm_quan) / cos_similarity;
+    } else if (scalar_quantizer_type == ScalarQuantizerType::PLAIN) {
+        delta = norm_data / norm_quan;
+    }
+
+    vl = delta * cb;
+}
+
 template <typename T, typename TP>
 static inline void rabitq_full_impl(
     const T* data,

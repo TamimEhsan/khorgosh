@@ -122,12 +122,66 @@ inline void scalar_quantize_optimized<uint16_t>(
 
 template <typename T>
 inline void vec_rescale(T* data, size_t dim, T val) {
+#if defined(__AVX512F__)
+    if constexpr (std::is_same_v<T, float>) {
+        __m512 v_val = _mm512_set1_ps(val);
+
+        // Process 64 floats (4 registers) per iteration. 
+        // No scalar tail needed since dim % 64 == 0.
+        for (size_t i = 0; i < dim; i += 64) {
+            __m512 d0 = _mm512_loadu_ps(data + i);
+            __m512 d1 = _mm512_loadu_ps(data + i + 16);
+            __m512 d2 = _mm512_loadu_ps(data + i + 32);
+            __m512 d3 = _mm512_loadu_ps(data + i + 48);
+
+            d0 = _mm512_mul_ps(d0, v_val);
+            d1 = _mm512_mul_ps(d1, v_val);
+            d2 = _mm512_mul_ps(d2, v_val);
+            d3 = _mm512_mul_ps(d3, v_val);
+
+            _mm512_storeu_ps(data + i, d0);
+            _mm512_storeu_ps(data + i + 16, d1);
+            _mm512_storeu_ps(data + i + 32, d2);
+            _mm512_storeu_ps(data + i + 48, d3);
+        }
+        return;
+    }
+#endif
+    // Fallback for non-AVX512 or non-float types
     RowMajorArrayMap<T> data_arr(data, 1, dim);
     data_arr *= val;
 }
 
 template <typename T>
 inline T euclidean_sqr(const T* __restrict__ vec0, const T* __restrict__ vec1, size_t dim) {
+#if defined(__AVX512F__)
+    if constexpr (std::is_same_v<T, float>) {
+        __m512 sum0 = _mm512_setzero_ps();
+        __m512 sum1 = _mm512_setzero_ps();
+        __m512 sum2 = _mm512_setzero_ps();
+        __m512 sum3 = _mm512_setzero_ps();
+
+        // No remainder tail needed since dim % 64 == 0
+        for (size_t i = 0; i < dim; i += 64) {
+            __m512 d0 = _mm512_sub_ps(_mm512_loadu_ps(vec0 + i),      _mm512_loadu_ps(vec1 + i));
+            __m512 d1 = _mm512_sub_ps(_mm512_loadu_ps(vec0 + i + 16), _mm512_loadu_ps(vec1 + i + 16));
+            __m512 d2 = _mm512_sub_ps(_mm512_loadu_ps(vec0 + i + 32), _mm512_loadu_ps(vec1 + i + 32));
+            __m512 d3 = _mm512_sub_ps(_mm512_loadu_ps(vec0 + i + 48), _mm512_loadu_ps(vec1 + i + 48));
+
+            sum0 = _mm512_fmadd_ps(d0, d0, sum0);
+            sum1 = _mm512_fmadd_ps(d1, d1, sum1);
+            sum2 = _mm512_fmadd_ps(d2, d2, sum2);
+            sum3 = _mm512_fmadd_ps(d3, d3, sum3);
+        }
+
+        // Horizontal fold
+        sum0 = _mm512_add_ps(sum0, sum1);
+        sum2 = _mm512_add_ps(sum2, sum3);
+        sum0 = _mm512_add_ps(sum0, sum2);
+
+        return _mm512_reduce_add_ps(sum0);
+    }
+#endif
     ConstVectorMap<T> v0(vec0, dim);
     ConstVectorMap<T> v1(vec1, dim);
     return (v0 - v1).dot(v0 - v1);
@@ -762,14 +816,54 @@ inline float ip64_fxu7_avx(
 }
 
 // inner product between float type and int type vectors
-template <typename TF, typename TI>
-inline TF ip_fxi(const TF* __restrict__ vec0, const TI* __restrict__ vec1, size_t dim) {
-    static_assert(std::is_floating_point_v<TF>, "TF must be an floating type");
-    static_assert(std::is_integral_v<TI>, "TI must be an integeral type");
+inline float ip_fxi(
+    const float* __restrict__ query, const uint8_t* __restrict__ code, size_t dim
+) {
+#if defined(__AVX512F__)
+    __m512 sum0 = _mm512_setzero_ps();
+    __m512 sum1 = _mm512_setzero_ps();
+    __m512 sum2 = _mm512_setzero_ps();
+    __m512 sum3 = _mm512_setzero_ps();
 
-    ConstVectorMap<TF> v0(vec0, dim);
-    ConstVectorMap<TI> v1(vec1, dim);
-    return v0.dot(v1.template cast<TF>());
+    // No remainder tail needed since dim % 64 == 0
+    for (size_t i = 0; i < dim; i += 64) {
+        // Load 4x 16-byte chunks independently
+        __m128i c8_0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(code + i));
+        __m128i c8_1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(code + i + 16));
+        __m128i c8_2 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(code + i + 32));
+        __m128i c8_3 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(code + i + 48));
+
+        // Upcast uint8_t -> int32_t -> float
+        __m512 cf0 = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(c8_0));
+        __m512 cf1 = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(c8_1));
+        __m512 cf2 = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(c8_2));
+        __m512 cf3 = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(c8_3));
+
+        // Multiply-Add
+        sum0 = _mm512_fmadd_ps(cf0, _mm512_loadu_ps(&query[i]), sum0);
+        sum1 = _mm512_fmadd_ps(cf1, _mm512_loadu_ps(&query[i + 16]), sum1);
+        sum2 = _mm512_fmadd_ps(cf2, _mm512_loadu_ps(&query[i + 32]), sum2);
+        sum3 = _mm512_fmadd_ps(cf3, _mm512_loadu_ps(&query[i + 48]), sum3);
+    }
+    
+    // Horizontal fold
+    sum0 = _mm512_add_ps(sum0, sum1);
+    sum2 = _mm512_add_ps(sum2, sum3);
+    sum0 = _mm512_add_ps(sum0, sum2);
+
+    return _mm512_reduce_add_ps(sum0);
+#elif defined(__AVX2__)
+    __m256 sum = _mm256_setzero_ps();
+    for (size_t i = 0; i < dim; i += 16) {
+        __m128i c8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(code));
+        contribute_ip(c8, &query[i], sum);
+        code += 16;
+    }
+    return mm256_reduce_add_ps(sum);
+#else
+    std::cerr << "AVX2 or AVX512 is required for excode ip functions\n";
+    exit(1);
+#endif
 }
 }  // namespace excode_ipimpl
 
@@ -1020,39 +1114,44 @@ inline float mask_ip_x0_q(const float* query, const uint64_t* data, size_t padde
     const float* it_query = query;
 // Easier
 #if defined(__AVX512F__)
+    // 4 independent accumulators to break the dependency chain
+    __m512 sum0 = _mm512_setzero_ps();
+    __m512 sum1 = _mm512_setzero_ps();
+    __m512 sum2 = _mm512_setzero_ps();
+    __m512 sum3 = _mm512_setzero_ps();
 
-    //    __m512 sum0 = _mm512_setzero_ps();
-    //    __m512 sum1 = _mm512_setzero_ps();
-    //    __m512 sum2 = _mm512_setzero_ps();
-    //    __m512 sum3 = _mm512_setzero_ps();
-
-    __m512 sum = _mm512_setzero_ps();
+    // No remainder loops needed since padded_dim % 64 == 0
     for (size_t i = 0; i < num_blk; ++i) {
-        uint64_t bits = reverse_bits_u64(*it_data);
+        // NOTE: See optimization warning below regarding this function
+        uint64_t bits = reverse_bits_u64(*it_data); // remove this
 
         auto mask0 = static_cast<__mmask16>(bits);
         auto mask1 = static_cast<__mmask16>(bits >> 16);
         auto mask2 = static_cast<__mmask16>(bits >> 32);
         auto mask3 = static_cast<__mmask16>(bits >> 48);
 
+        // Masked loads (Zeroes out lanes where mask bit is 0)
         __m512 masked0 = _mm512_maskz_loadu_ps(mask0, it_query);
         __m512 masked1 = _mm512_maskz_loadu_ps(mask1, it_query + 16);
         __m512 masked2 = _mm512_maskz_loadu_ps(mask2, it_query + 32);
         __m512 masked3 = _mm512_maskz_loadu_ps(mask3, it_query + 48);
 
-        sum = _mm512_add_ps(sum, masked0);
-        sum = _mm512_add_ps(sum, masked1);
-        sum = _mm512_add_ps(sum, masked2);
-        sum = _mm512_add_ps(sum, masked3);
-
-        //         _mm_prefetch(reinterpret_cast<const char*>(it_query + 128), _MM_HINT_T1);
+        // Parallel accumulation (4 independent ops per loop)
+        sum0 = _mm512_add_ps(sum0, masked0);
+        sum1 = _mm512_add_ps(sum1, masked1);
+        sum2 = _mm512_add_ps(sum2, masked2);
+        sum3 = _mm512_add_ps(sum3, masked3);
 
         ++it_data;
         it_query += 64;
     }
 
-    //    __m512 sum = _mm512_add_ps(_mm512_add_ps(sum0, sum1), _mm512_add_ps(sum2, sum3));
-    return _mm512_reduce_add_ps(sum);
+    // Horizontal fold at the end
+    sum0 = _mm512_add_ps(sum0, sum1);
+    sum2 = _mm512_add_ps(sum2, sum3);
+    sum0 = _mm512_add_ps(sum0, sum2);
+
+    return _mm512_reduce_add_ps(sum0);
 #elif defined(__AVX2__)
 
     __m256 sum = _mm256_setzero_ps();

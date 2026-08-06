@@ -11,6 +11,7 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 SET(CMAKE_CXX_FLAGS  "-Wall -Ofast -Wextra -lrt -march=native -fpic -fopenmp -ftree-vectorize -fexceptions")
+# SET(CMAKE_CXX_FLAGS  "-Wall -O2 -Wextra -lrt -march=native -fpic -fopenmp -ftree-vectorize -fexceptions -g -fno-omit-frame-pointer -fno-inline-functions -fno-inline -fno-inline-functions -fno-inline-small-functions -fno-default-inline -fno-early-inlining -fno-ipa-cp")
 
 add_subdirectory(sample/cpp)
 
