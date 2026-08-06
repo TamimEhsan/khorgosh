@@ -905,7 +905,7 @@ static inline void new_transpose_bin(
 #endif
 }
 
-static inline void new_transpose_bin_512(
+static inline void new_transpose_bin_512_1_7(
     const uint8_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
 ) {
 #if defined(__AVX512BW__)
@@ -978,6 +978,59 @@ static inline void new_transpose_bin_512(
     std::cerr << "AVX512BW or AVX2 is required for new_transpose_bin_512\n";
     exit(1);
 #endif
+}
+
+
+static inline void new_transpose_bin_512_8(
+    const uint8_t* q, uint64_t* tq64, size_t padded_dim
+) {
+    auto tq = reinterpret_cast<uint8_t*>(tq64);
+
+    // 1. Mask to reverse bytes strictly WITHIN each 64-bit block.
+    // The first 8 bytes stay in the lower 64 bits, the next 8 stay in the upper.
+    __m512i shuf_mask = _mm512_broadcast_i32x4(
+        _mm_setr_epi8(
+            7, 6, 5, 4, 3, 2, 1, 0,       // Reverse lower 64-bit block
+            15, 14, 13, 12, 11, 10, 9, 8  // Reverse upper 64-bit block
+        )
+    );
+
+    // 2. Mask to reverse the eight 64-bit blocks across the full 512-bit register
+    __m512i permute_mask = _mm512_setr_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+
+    size_t i = 0;
+    size_t end_64 = (padded_dim / 64) * 64;
+
+    for (; i < end_64; i += 64) {
+        __m512i vec = _mm512_loadu_si512(q + i);
+
+        // State 1: Every 64-bit chunk is internally byte-reversed, 
+        // but the chunks themselves have NOT moved.
+        __m512i byte_reversed = _mm512_shuffle_epi8(vec, shuf_mask);
+
+        // State 2: Now we safely flip the order of the 64-bit chunks across the register.
+        __m512i fully_reversed = _mm512_permutexvar_epi64(permute_mask, byte_reversed);
+
+        _mm512_storeu_si512(tq + i, fully_reversed);
+    }
+
+}
+
+static inline void new_transpose_bin_512(
+    const uint8_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
+) {
+    // for b query in [1, 7], use new_transpose_bin_512_avx512_1_7
+    if (b_query >= 1 && b_query < 8) {
+        new_transpose_bin_512_1_7(q, tq, padded_dim, b_query);
+        return;
+    } else if (b_query == 8) {
+        new_transpose_bin_512_8(q, tq, padded_dim);
+        return;
+    } else {
+        std::cerr << "Error: b_query must be in the range [1, 8] for new_transpose_bin_512_avx512." << std::endl;
+        std::exit(EXIT_FAILURE);
+        return;
+    }
 }
 
 inline float mask_ip_x0_q_old(const float* query, const uint64_t* data, size_t padded_dim) {

@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 
+inline int early_exit_count[20] = {0};  // Global array to track early exits per block
+
 // Helper: AVX2 64-bit Popcount; Mula's method
 inline __m256i popcount_avx2(__m256i v) {
 #if defined(__AVX2__)
@@ -36,68 +38,61 @@ inline __m256i popcount_avx2(__m256i v) {
 
 inline float warmup_ip_x0_q_512(
     const uint64_t* data,
-    const uint64_t* query,
+    const uint64_t* query64,
     float delta,
     float vl,
     size_t padded_dim,
-    size_t b_query
+    [[maybe_unused]] size_t b_query,
+    float threshold = 1000000.0
 ) {
 #if defined(__AVX512VPOPCNTDQ__) && defined(__AVX512BW__)
-    size_t ip_scalar = 0;
-    size_t ppc_scalar = 0;
-
+    auto query = reinterpret_cast<const uint8_t*>(query64);
     __m512i acc_ip = _mm512_setzero_si512();
-    __m512i acc_ppc = _mm512_setzero_si512();
 
     size_t i = 0;
-    size_t dim_end_512 = (padded_dim / 512) * 512;
+    // Process 64 dimensions per loop iteration
+    size_t dim_end_64 = (padded_dim / 64) * 64;
 
-    __m512i acc_bits[b_query];
-    for (size_t j = 0; j < b_query; ++j) {
-        acc_bits[j] = _mm512_setzero_si512();
-    }
+    for (; i < dim_end_64; i += 64) {
+        // 1. Load 64 dimensions of the 1-bit database to use directly as a mask
+        __mmask64 db_mask = *data;
+        db_mask = ~db_mask; // Inverts all 64 bits
+        data++;
 
-    for (; i < dim_end_512; i += 512) {
-        __m512i data_vec = _mm512_loadu_si512(data);
-        data += 8;
+        // 2. Load 64 dimensions (64 bytes) of the 8-bit query
+        __m512i query_vec = _mm512_loadu_si512((const __m512i*)(query + i));
 
-        acc_ppc = _mm512_add_epi64(acc_ppc, _mm512_popcnt_epi64(data_vec));
+        // 3. Mask out the query bytes where the DB bit is 0
+        // Result: Bytes are kept if DB=1, zeroed out if DB=0
+        __m512i masked_query = _mm512_maskz_mov_epi8(db_mask, query_vec);
 
-        for (size_t j = 0; j < b_query; ++j) {
-            __m512i query_vec = _mm512_loadu_si512(query);
-            query += 8;
+        // 4. Fast horizontal sum of 8-bit integers into 64-bit accumulators
+        // _mm512_sad_epu8 computes the Sum of Absolute Differences against zero,
+        // which efficiently sums 8 adjacent bytes into a 64-bit integer.
+        // It outputs eight 64-bit sums per vector.
+        __m512i byte_sums = _mm512_sad_epu8(masked_query, _mm512_setzero_si512());
 
-            __m512i pop = _mm512_popcnt_epi64(_mm512_and_si512(data_vec, query_vec));
-            acc_bits[j] = _mm512_add_epi64(acc_bits[j], pop);
+        // 5. Add to the master 64-bit accumulators
+        acc_ip = _mm512_add_epi64(acc_ip, byte_sums);
+
+        if( i%192 or i+64 >= padded_dim ) continue;
+        float ip_scalar = static_cast<float>(_mm512_reduce_add_epi64(acc_ip));
+        ip_scalar = ip_scalar * padded_dim / (i + 64);
+        float dist = delta * ip_scalar + vl;
+        // dist = dist * std::sqrt(static_cast<float>(padded_dim)/(i+64));
+
+        float epsilon0 = 20; // Example value for epsilon0
+        double rejectThreshold = (1.0 + (epsilon0 / std::sqrt(i+64))) * threshold;
+        if(dist > rejectThreshold and i+64 < padded_dim) {
+            // early_exit_count[i/64]++;
+            return dist;
         }
     }
 
-    size_t remaining_dim = padded_dim - i;
-    if (remaining_dim > 0) {
-        size_t num_chunks = remaining_dim / 64;
-        auto valid_mask = static_cast<__mmask8>((1u << num_chunks) - 1u);
+    // Reduce the eight 64-bit accumulators down to a single scalar
+    float ip_scalar = static_cast<float>(_mm512_reduce_add_epi64(acc_ip));
 
-        __m512i data_vec = _mm512_maskz_loadu_epi64(valid_mask, data);
-        acc_ppc = _mm512_add_epi64(acc_ppc, _mm512_popcnt_epi64(data_vec));
-
-        for (size_t j = 0; j < b_query; ++j) {
-            __m512i query_vec = _mm512_maskz_loadu_epi64(valid_mask, query);
-            query += num_chunks;
-
-            __m512i pop = _mm512_popcnt_epi64(_mm512_and_si512(data_vec, query_vec));
-            acc_bits[j] = _mm512_add_epi64(acc_bits[j], pop);
-        }
-    }
-
-    for (size_t j = 0; j < b_query; ++j) {
-        __m128i shift = _mm_cvtsi32_si128(static_cast<int>(j));
-        acc_ip = _mm512_add_epi64(acc_ip, _mm512_sll_epi64(acc_bits[j], shift));
-    }
-
-    ip_scalar += static_cast<size_t>(_mm512_reduce_add_epi64(acc_ip));
-    ppc_scalar += static_cast<size_t>(_mm512_reduce_add_epi64(acc_ppc));
-
-    return (delta * static_cast<float>(ip_scalar)) + (vl * static_cast<float>(ppc_scalar));
+    return delta * ip_scalar + vl;
 #elif defined(__AVX2__)
     size_t ip_scalar = 0;
     size_t ppc_scalar = 0;
@@ -125,9 +120,9 @@ inline float warmup_ip_x0_q_512(
 
         for (size_t j = 0; j < b_query; ++j) {
             // Load 64 bytes of transposed query matching the 512-bit block layout
-            __m256i query_vec_lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(query));
-            __m256i query_vec_hi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(query + 4));
-            query += 8; // Advance 8 x 64-bit ints (64 bytes)
+            __m256i query_vec_lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(query64));
+            __m256i query_vec_hi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(query64 + 4));
+            query64 += 8; // Advance 8 x 64-bit ints (64 bytes)
 
             __m256i pop_lo = popcount_avx2(_mm256_and_si256(data_vec_lo, query_vec_lo));
             __m256i pop_hi = popcount_avx2(_mm256_and_si256(data_vec_hi, query_vec_hi));

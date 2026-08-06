@@ -155,15 +155,17 @@ struct BinDataMap {
         : bin_code_(reinterpret_cast<uint64_t*>(data))
         , f_add_(*reinterpret_cast<T*>(data + (padded_dim / 8)))
         , f_rescale_(*(reinterpret_cast<T*>(data + (padded_dim / 8)) + 1))
-        , f_error_(*(reinterpret_cast<T*>(data + (padded_dim / 8)) + 2)) {}
+        , f_error_(*(reinterpret_cast<T*>(data + (padded_dim / 8)) + 2))
+        , f_popcount_(*(reinterpret_cast<T*>(data + (padded_dim / 8)) + 3)) {}
 
     [[nodiscard]] uint64_t* bin_code() { return bin_code_; }
     [[nodiscard]] T& f_add() { return f_add_; }
     [[nodiscard]] T& f_rescale() { return f_rescale_; }
     [[nodiscard]] T& f_error() { return f_error_; }
+    [[nodiscard]] T& f_popcount() { return f_popcount_; }
 
     static size_t data_bytes(size_t padded_dim) {
-        return (padded_dim / 8) + (sizeof(T) * 3);
+        return (padded_dim / 8) + (sizeof(T) * 4);
     }
 
    private:
@@ -171,6 +173,7 @@ struct BinDataMap {
     T& f_add_;
     T& f_rescale_;
     T& f_error_;
+    T& f_popcount_;
 };
 
 template <typename T>
@@ -180,15 +183,17 @@ struct ConstBinDataMap {
         : bin_code_(reinterpret_cast<const uint64_t*>(data))
         , f_add_(*reinterpret_cast<const T*>(data + (padded_dim / 8)))
         , f_rescale_(*(reinterpret_cast<const T*>(data + (padded_dim / 8)) + 1))
-        , f_error_(*(reinterpret_cast<const T*>(data + (padded_dim / 8)) + 2)) {}
+        , f_error_(*(reinterpret_cast<const T*>(data + (padded_dim / 8)) + 2))
+        , f_popcount_(*(reinterpret_cast<const T*>(data + (padded_dim / 8)) + 3)) {}
 
     [[nodiscard]] const uint64_t* bin_code() { return bin_code_; }
     [[nodiscard]] const T& f_add() { return f_add_; }
     [[nodiscard]] const T& f_rescale() { return f_rescale_; }
     [[nodiscard]] const T& f_error() { return f_error_; }
+    [[nodiscard]] const T& f_popcount() { return f_popcount_; }
 
     static size_t data_bytes(size_t padded_dim) {
-        return (padded_dim / 8) + (sizeof(T) * 3);
+        return (padded_dim / 8) + (sizeof(T) * 4);
     }
 
    private:
@@ -196,5 +201,6 @@ struct ConstBinDataMap {
     const T& f_add_;
     const T& f_rescale_;
     const T& f_error_;
+    const T& f_popcount_;
 };
 }  // namespace rabitqlib

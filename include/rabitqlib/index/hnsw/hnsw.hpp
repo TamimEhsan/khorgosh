@@ -27,6 +27,8 @@
 #include "rabitqlib/utils/tools.hpp"
 #include "rabitqlib/utils/visited_pool.hpp"
 
+extern int early_exit_count[20];  // Global array to track early exits per block
+
 namespace rabitqlib::hnsw {
 
 template <typename T>
@@ -290,7 +292,7 @@ class HierarchicalNSW {
 
     // ANN Search
     void get_bin_est(
-        std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
+        std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&, float threashold = 1000000.0
     );
 
     void get_ex_est(
@@ -977,7 +979,8 @@ inline void HierarchicalNSW::get_bin_est(
     std::vector<float>& q_to_centroids,
     SplitSingleQuery<float>& query_wrapper,
     PID currObj,
-    HierarchicalNSW::EstimateRecord& res
+    HierarchicalNSW::EstimateRecord& res,
+    float threshold
 ) {
     if (metric_type_ == METRIC_IP) {
         float norm = q_to_centroids[get_clusterid_by_internalid(currObj)];
@@ -990,7 +993,8 @@ inline void HierarchicalNSW::get_bin_est(
             res.est_dist,
             res.low_dist,
             -norm,
-            error
+            error,
+            threshold
         );
     } else {
         // L2 distance
@@ -1003,7 +1007,8 @@ inline void HierarchicalNSW::get_bin_est(
             res.est_dist,
             res.low_dist,
             norm * norm,
-            norm
+            norm,
+            threshold
         );
     }
 }
@@ -1219,7 +1224,9 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
 
     const size_t prefetch_size = (((padded_dim_ / 8) + 63) / 64) + 1;
     const size_t prefetch_lookahead = 4;  // Number of neighbors to prefetch in advance.
-
+    for(int i=0;i<20;i++) {
+        early_exit_count[i] = 0;
+    }
     while (candidate_set.has_next()) {
         // Step 1 - get the next node to explore.
         PID current_node_id = candidate_set.pop();
@@ -1243,7 +1250,7 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
             vl->set(candidate_id);
 
             EstimateRecord candest;
-            get_bin_est(q_to_centroids, query_wrapper, candidate_id, candest);
+            get_bin_est(q_to_centroids, query_wrapper, candidate_id, candest, candidate_set.top_dist());
 
             bool flag_update_KNNs = boundedKNN.size() < TOPK || candest.low_dist < distk;
 
@@ -1269,6 +1276,11 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
             );
         }
     }
+
+    for(int i=0;i<20;i++) {
+        std::cout << early_exit_count[i] << " ";
+    }
+    std::cout << std::endl;
 
     visited_list_pool_->release_vis_list(vl);
 }

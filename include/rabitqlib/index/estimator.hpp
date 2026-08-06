@@ -195,22 +195,25 @@ inline void split_single_estdist(
     float& est_dist,
     float& low_dist,
     float g_add = 0,
-    float g_error = 0
+    float g_error = 0,
+    float threshold = 1000000.0
 ) {
     ConstBinDataMap<float> cur_bin(bin_data, padded_dim);
 
-    ip_x0_qr = warmup_ip_x0_q_512(
+    float delta = cur_bin.f_rescale() * q_obj.delta();
+    float vl = cur_bin.f_add() + g_add + cur_bin.f_rescale() * (q_obj.vl() * cur_bin.f_popcount() + q_obj.k1xsumq()) + delta * q_obj.g_sumq();
+    delta = -delta;
+
+    est_dist = warmup_ip_x0_q_512(
         cur_bin.bin_code(),
         q_obj.query_bin(),
-        q_obj.delta(),
-        q_obj.vl(),
+        delta,
+        vl,
         padded_dim,
-        q_obj.num_bits()
+        q_obj.num_bits(),
+        threshold
     );
-
-    est_dist =
-        cur_bin.f_add() + g_add + (cur_bin.f_rescale() * (ip_x0_qr + q_obj.k1xsumq()));
-
+    
     low_dist = est_dist - (cur_bin.f_error() * g_error);
 };
 
