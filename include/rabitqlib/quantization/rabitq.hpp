@@ -250,20 +250,34 @@ inline void quantize_split_batch(
 // xy_bits::kMaxCombinedBits (9) combined. At base_bits == 1, equivalent to
 // quantize_split_single()'s ex_bits-only path (see xy_quantization_test.cpp).
 // Purely additive; quantize_split_single/quantize_split_batch are unchanged.
+// x+y quantization of a single vector: one (base_bits+extra_bits)-bit code,
+// stored once, split across the two regions. xy_base_data holds the top
+// base_bits (the cheap filter layer, with its own factors), xy_extra_data
+// holds the bottom extra_bits (the refine layer, with the combined code's
+// factors). The base bits are never written twice -- the refine step
+// recovers the combined inner product from the filter step's base inner
+// product via ip(base)*2^extra_bits + ip(extra) (see xy_fulldist_boosting).
+//
+// xy_extra_data may be nullptr when extra_bits == 0.
 inline void quantize_xy_single(
     const float* data,
     const float* centroid,
     size_t padded_dim,
     size_t base_bits,
     size_t extra_bits,
-    char* xy_data,
+    char* xy_base_data,
+    char* xy_extra_data,
     MetricType metric_type = METRIC_L2,
     RabitqConfig config = RabitqConfig()
 ) {
-    XYDataMap<float> cur_xy(xy_data, padded_dim, base_bits, extra_bits);
+    XyBaseDataMap<float> cur_base(xy_base_data, padded_dim, base_bits);
 
     std::vector<uint8_t> base_raw(padded_dim);
     std::vector<uint8_t> extra_raw(extra_bits > 0 ? padded_dim : 0);
+
+    float f_add_full = 0;
+    float f_rescale_full = 0;
+    float f_error_full = 0;
 
     rabitq_impl::xy_bits::xy_split_code_with_factor<float, uint8_t>(
         data,
@@ -273,53 +287,28 @@ inline void quantize_xy_single(
         extra_bits,
         base_raw.data(),
         extra_raw.data(),
-        cur_xy.f_add(),
-        cur_xy.f_rescale(),
-        cur_xy.f_error(),
+        cur_base.f_add(),
+        cur_base.f_rescale(),
+        cur_base.f_error(),
+        f_add_full,
+        f_rescale_full,
+        f_error_full,
         metric_type,
         config.t_const
     );
 
     rabitq_impl::ex_bits::packing_rabitqplus_code(
-        base_raw.data(), cur_xy.base_code(), padded_dim, base_bits
+        base_raw.data(), cur_base.base_code(), padded_dim, base_bits
     );
-    if (extra_bits > 0) {
-        rabitq_impl::ex_bits::packing_rabitqplus_code(
-            extra_raw.data(), cur_xy.extra_code(), padded_dim, extra_bits
-        );
-    }
-}
 
-// Two-layer x+y quantization: a standalone base_bits-only layer (extra_bits
-// forced to 0, independently optimized -- the cheap-filter layer) plus the
-// full base_bits+extra_bits layer (the refinement layer). base_config and
-// extra_config are independent since they optimize different total
-// bit-widths (base_bits vs base_bits+extra_bits) and are not interchangeable.
-inline void quantize_xy_two_layer(
-    const float* data,
-    const float* centroid,
-    size_t padded_dim,
-    size_t base_bits,
-    size_t extra_bits,
-    char* xy_base_data,
-    char* xy_extra_data,
-    MetricType metric_type = METRIC_L2,
-    RabitqConfig base_config = RabitqConfig(),
-    RabitqConfig extra_config = RabitqConfig()
-) {
-    quantize_xy_single(
-        data, centroid, padded_dim, base_bits, 0, xy_base_data, metric_type, base_config
-    );
-    quantize_xy_single(
-        data,
-        centroid,
-        padded_dim,
-        base_bits,
-        extra_bits,
-        xy_extra_data,
-        metric_type,
-        extra_config
-    );
+    if (extra_bits > 0) {
+        XyExtraDataMap<float> cur_extra(xy_extra_data, padded_dim, extra_bits);
+        rabitq_impl::ex_bits::packing_rabitqplus_code(
+            extra_raw.data(), cur_extra.extra_code(), padded_dim, extra_bits
+        );
+        cur_extra.f_add_ex() = f_add_full;
+        cur_extra.f_rescale_ex() = f_rescale_full;
+    }
 }
 
 inline void quantize_split_single(

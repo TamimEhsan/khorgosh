@@ -624,18 +624,94 @@ static inline void rabitq_full_impl(
 
 // Splits the same combined code total_bits::rabitq_full_impl already builds
 // (one real sign bit + cosine-optimized magnitude, unchanged) into a
-// base_bits/extra_bits pair instead of always 1/ex_bits. f_add/f_rescale/
-// f_error depend only on base_bits+extra_bits, and are meant to be used with
-// both codes together: ip(base)*2^extra_bits + ip(extra).
+// base_bits/extra_bits pair instead of always 1/ex_bits. The code is built
+// and stored exactly once: the base half is the top base_bits of it, the
+// extra half is the bottom extra_bits, so the two together cost
+// base_bits+extra_bits bits per dimension and satisfy
+// ip(total) == ip(base)*2^extra_bits + ip(extra) exactly -- which is what
+// lets the refine step reuse the filter step's base inner product
+// (distance boosting), just as the 1+y path reuses ip_x0_qr.
 //
-// base_bits == 1 is bit-for-bit identical to today's one_bit_code +
-// ex_bits_code_with_factor(ex_bits=extra_bits) (see xy_quantization_test.cpp).
+// Two factor triplets come out of it, mirroring the 1+y layout:
+//   * (f_add_base, f_rescale_base, f_error_base) -- for estimating with the
+//     base code alone (the cheap filter), derived from the truncated code
+//     with cb = -(2^base_bits - 1)/2, exactly as BinDataMap's factors are.
+//   * (f_add_full, f_rescale_full, f_error_full) -- for estimating with the
+//     combined code, with cb = -(2^(base_bits+extra_bits) - 1)/2. Only
+//     f_add/f_rescale are stored in practice; the refine step's error bound
+//     comes from f_error_base / 2^extra_bits, as in split_single_fulldist.
+//
+// base_bits == 1 is bit-for-bit identical to today's one_bit_code_with_factor
+// + ex_bits_code_with_factor(ex_bits=extra_bits) (see xy_quantization_test.cpp).
 //
 // NOTE: best_rescale_factor()'s kTightStart table only covers magnitude
 // widths 0-8, so base_bits + extra_bits is capped at 9 for now.
 namespace xy_bits {
 
 constexpr size_t kMaxCombinedBits = 9;
+
+/**
+ * @brief Derive the 3 estimation factors for an arbitrary integer code.
+ *
+ * one_bit_code_with_factor() and ex_bits_code_with_factor() both compute the
+ * same three quantities from xu_cb = code + cb, differing only in how the
+ * code and cb are produced. This is that shared derivation, so a base-only
+ * code and a combined code can both be turned into factors without
+ * duplicating the algebra. With cb = -0.5 and a sign-bit code it reproduces
+ * one_bit_code_with_factor()'s outputs bit-for-bit.
+ *
+ * @param residual data - centroid
+ * @param code integer code, values in [0, 2^bits)
+ * @param cb offset-binary constant for that code width, -(2^bits - 1)/2
+ */
+template <typename T>
+inline void code_factors(
+    const T* residual,
+    const T* centroid,
+    size_t dim,
+    const int* code,
+    float cb,
+    T& f_add,
+    T& f_rescale,
+    T& f_error,
+    MetricType metric_type = METRIC_L2
+) {
+    ConstRowMajorArrayMap<int> code_arr(code, 1, static_cast<long>(dim));
+    RowMajorArray<T> xu_cb = code_arr.template cast<T>() + cb;
+
+    T l2_sqr = l2norm_sqr<T>(residual, dim);
+    T l2_norm = std::sqrt(l2_sqr);
+
+    T ip_resi_xucb = dot_product<T>(residual, xu_cb.data(), dim);
+    T ip_cent_xucb = dot_product<T>(centroid, xu_cb.data(), dim);
+
+    // corner case
+    if (ip_resi_xucb == 0) {
+        ip_resi_xucb = std::numeric_limits<T>::infinity();
+    }
+
+    T tmp_error =
+        l2_norm * kConstEpsilon *
+        std::sqrt(
+            (((l2_sqr * l2norm_sqr<T>(xu_cb.data(), dim)) / (ip_resi_xucb * ip_resi_xucb)) -
+             1) /
+            (dim - 1)
+        );
+
+    if (metric_type == METRIC_L2) {
+        f_add = l2_sqr + (2 * l2_sqr * ip_cent_xucb / ip_resi_xucb);
+        f_rescale = -2 * l2_sqr / ip_resi_xucb;
+        f_error = 2 * tmp_error;
+    } else if (metric_type == METRIC_IP) {
+        f_add = 1 - dot_product<T>(residual, centroid, dim) +
+                (l2_sqr * ip_cent_xucb / ip_resi_xucb);
+        f_rescale = -l2_sqr / ip_resi_xucb;
+        f_error = 1 * tmp_error;
+    } else {
+        std::cerr << "Unsupported metric type in code_factors()\n" << std::flush;
+        exit(1);
+    }
+}
 
 template <typename T, typename TP>
 inline void xy_split_code_with_factor(
@@ -646,9 +722,12 @@ inline void xy_split_code_with_factor(
     size_t extra_bits,
     TP* base_code,
     TP* extra_code,
-    T& f_add,
-    T& f_rescale,
-    T& f_error,
+    T& f_add_base,
+    T& f_rescale_base,
+    T& f_error_base,
+    T& f_add_full,
+    T& f_rescale_full,
+    T& f_error_full,
     MetricType metric_type = METRIC_L2,
     double t_const = -1
 ) {
@@ -674,7 +753,14 @@ inline void xy_split_code_with_factor(
         // 1-bit formula directly (same as one_bit_compact_code).
         std::vector<int> binary_code(dim);
         one_bit::one_bit_code_with_factor(
-            data, centroid, dim, binary_code.data(), f_add, f_rescale, f_error, metric_type
+            data,
+            centroid,
+            dim,
+            binary_code.data(),
+            f_add_full,
+            f_rescale_full,
+            f_error_full,
+            metric_type
         );
         for (size_t i = 0; i < dim; ++i) {
             total_code[i] = static_cast<uint32_t>(binary_code[i]);
@@ -689,9 +775,9 @@ inline void xy_split_code_with_factor(
             dim,
             mag_bits,
             total_code.data(),
-            f_add,
-            f_rescale,
-            f_error,
+            f_add_full,
+            f_rescale_full,
+            f_error_full,
             metric_type,
             t_const
         );
@@ -702,12 +788,40 @@ inline void xy_split_code_with_factor(
 
     uint32_t extra_mask =
         (extra_bits > 0) ? static_cast<uint32_t>((1U << extra_bits) - 1) : 0U;
+    std::vector<int> base_code_int(dim);
     for (size_t i = 0; i < dim; ++i) {
-        base_code[i] = static_cast<TP>(total_code[i] >> extra_bits);
+        uint32_t base_val = total_code[i] >> extra_bits;
+        base_code_int[i] = static_cast<int>(base_val);
+        base_code[i] = static_cast<TP>(base_val);
         if (extra_bits > 0) {
             extra_code[i] = static_cast<TP>(total_code[i] & extra_mask);
         }
     }
+
+    if (extra_bits == 0) {
+        // Base code *is* the whole code; no second derivation needed, and
+        // sharing the factors keeps the two layers exactly consistent.
+        f_add_base = f_add_full;
+        f_rescale_base = f_rescale_full;
+        f_error_base = f_error_full;
+        return;
+    }
+
+    ConstRowMajorArrayMap<T> data_arr(data, 1, dim);
+    ConstRowMajorArrayMap<T> cent_arr(centroid, 1, dim);
+    RowMajorArray<T> residual_arr = data_arr - cent_arr;
+
+    code_factors<T>(
+        residual_arr.data(),
+        centroid,
+        dim,
+        base_code_int.data(),
+        -(static_cast<float>((1U << base_bits) - 1) / 2.F),
+        f_add_base,
+        f_rescale_base,
+        f_error_base,
+        metric_type
+    );
 }
 
 }  // namespace xy_bits

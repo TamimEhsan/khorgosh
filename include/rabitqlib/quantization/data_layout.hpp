@@ -148,83 +148,105 @@ struct ConstExDataMap {
     const T& f_recale_ex_;
 };
 
-// Storage for x+y quantization: a base_bits-wide code and an extra_bits-wide
-// code (each packed via pack_excode), plus one shared (f_add, f_rescale,
-// f_error) triplet used with both codes together. If extra_bits == 0,
-// extra_code() should not be dereferenced.
+// Base (x-bit) layer of an x+y quantized vector: the top base_bits of the
+// combined code, packed via pack_excode, plus its own three factors. This is
+// the cheap filter layer, and it plays exactly the role BinDataMap plays in
+// the 1+y layout -- which is what it collapses to at base_bits == 1.
 template <typename T>
-struct XYDataMap {
+struct XyBaseDataMap {
    public:
-    explicit XYDataMap(char* data, size_t padded_dim, size_t base_bits, size_t extra_bits)
+    explicit XyBaseDataMap(char* data, size_t padded_dim, size_t base_bits)
         : base_code_(reinterpret_cast<uint8_t*>(data))
-        , extra_code_(base_code_ + (padded_dim * base_bits / 8))
-        , f_add_(*reinterpret_cast<T*>(
-              data + (padded_dim * base_bits / 8) + (padded_dim * extra_bits / 8)
-          ))
-        , f_rescale_(
-              *(reinterpret_cast<T*>(
-                    data + (padded_dim * base_bits / 8) + (padded_dim * extra_bits / 8)
-                ) + 1)
-          )
-        , f_error_(
-              *(reinterpret_cast<T*>(
-                    data + (padded_dim * base_bits / 8) + (padded_dim * extra_bits / 8)
-                ) + 2)
-          ) {}
+        , f_add_(*reinterpret_cast<T*>(data + (padded_dim * base_bits / 8)))
+        , f_rescale_(*(reinterpret_cast<T*>(data + (padded_dim * base_bits / 8)) + 1))
+        , f_error_(*(reinterpret_cast<T*>(data + (padded_dim * base_bits / 8)) + 2)) {}
 
-    static size_t data_bytes(size_t padded_dim, size_t base_bits, size_t extra_bits) {
-        return (padded_dim * base_bits / 8) + (padded_dim * extra_bits / 8) +
-               (sizeof(T) * 3);
+    static size_t data_bytes(size_t padded_dim, size_t base_bits) {
+        return (padded_dim * base_bits / 8) + (sizeof(T) * 3);
     }
 
     [[nodiscard]] uint8_t* base_code() { return base_code_; }
-    [[nodiscard]] uint8_t* extra_code() { return extra_code_; }
     [[nodiscard]] T& f_add() { return f_add_; }
     [[nodiscard]] T& f_rescale() { return f_rescale_; }
     [[nodiscard]] T& f_error() { return f_error_; }
 
    private:
     uint8_t* base_code_;
-    uint8_t* extra_code_;
     T& f_add_;
     T& f_rescale_;
     T& f_error_;
 };
 
 template <typename T>
-struct ConstXYDataMap {
+struct ConstXyBaseDataMap {
    public:
-    explicit ConstXYDataMap(
-        const char* data, size_t padded_dim, size_t base_bits, size_t extra_bits
-    )
+    explicit ConstXyBaseDataMap(const char* data, size_t padded_dim, size_t base_bits)
         : base_code_(reinterpret_cast<const uint8_t*>(data))
-        , extra_code_(base_code_ + (padded_dim * base_bits / 8))
-        , f_add_(*reinterpret_cast<const T*>(
-              data + (padded_dim * base_bits / 8) + (padded_dim * extra_bits / 8)
-          ))
+        , f_add_(*reinterpret_cast<const T*>(data + (padded_dim * base_bits / 8)))
         , f_rescale_(
-              *(reinterpret_cast<const T*>(
-                    data + (padded_dim * base_bits / 8) + (padded_dim * extra_bits / 8)
-                ) + 1)
+              *(reinterpret_cast<const T*>(data + (padded_dim * base_bits / 8)) + 1)
           )
-        , f_error_(
-              *(reinterpret_cast<const T*>(
-                    data + (padded_dim * base_bits / 8) + (padded_dim * extra_bits / 8)
-                ) + 2)
-          ) {}
+        , f_error_(*(reinterpret_cast<const T*>(data + (padded_dim * base_bits / 8)) + 2)) {
+    }
 
     [[nodiscard]] const uint8_t* base_code() const { return base_code_; }
-    [[nodiscard]] const uint8_t* extra_code() const { return extra_code_; }
     [[nodiscard]] const T& f_add() const { return f_add_; }
     [[nodiscard]] const T& f_rescale() const { return f_rescale_; }
     [[nodiscard]] const T& f_error() const { return f_error_; }
 
    private:
     const uint8_t* base_code_;
-    const uint8_t* extra_code_;
     const T& f_add_;
     const T& f_rescale_;
     const T& f_error_;
+};
+
+// Extra (y-bit) layer of an x+y quantized vector: the bottom extra_bits of
+// the *same* combined code (never a second copy of the base bits), plus the
+// combined code's f_add/f_rescale. The refine step's error bound comes from
+// the base layer's f_error / 2^extra_bits, so no third float is stored here
+// -- identical in shape to ExDataMap. Zero-sized when extra_bits == 0.
+template <typename T>
+struct XyExtraDataMap {
+   public:
+    explicit XyExtraDataMap(char* data, size_t padded_dim, size_t extra_bits)
+        : extra_code_(reinterpret_cast<uint8_t*>(data))
+        , f_add_ex_(*reinterpret_cast<T*>(data + (padded_dim * extra_bits / 8)))
+        , f_rescale_ex_(*(reinterpret_cast<T*>(data + (padded_dim * extra_bits / 8)) + 1)) {
+    }
+
+    static size_t data_bytes(size_t padded_dim, size_t extra_bits) {
+        return extra_bits > 0 ? (padded_dim * extra_bits / 8) + (sizeof(T) * 2) : 0;
+    }
+
+    [[nodiscard]] uint8_t* extra_code() { return extra_code_; }
+    [[nodiscard]] T& f_add_ex() { return f_add_ex_; }
+    [[nodiscard]] T& f_rescale_ex() { return f_rescale_ex_; }
+
+   private:
+    uint8_t* extra_code_;
+    T& f_add_ex_;
+    T& f_rescale_ex_;
+};
+
+template <typename T>
+struct ConstXyExtraDataMap {
+   public:
+    explicit ConstXyExtraDataMap(const char* data, size_t padded_dim, size_t extra_bits)
+        : extra_code_(reinterpret_cast<const uint8_t*>(data))
+        , f_add_ex_(*reinterpret_cast<const T*>(data + (padded_dim * extra_bits / 8)))
+        , f_rescale_ex_(
+              *(reinterpret_cast<const T*>(data + (padded_dim * extra_bits / 8)) + 1)
+          ) {}
+
+    [[nodiscard]] const uint8_t* extra_code() const { return extra_code_; }
+    [[nodiscard]] const T& f_add_ex() const { return f_add_ex_; }
+    [[nodiscard]] const T& f_rescale_ex() const { return f_rescale_ex_; }
+
+   private:
+    const uint8_t* extra_code_;
+    const T& f_add_ex_;
+    const T& f_rescale_ex_;
 };
 
 template <typename T>

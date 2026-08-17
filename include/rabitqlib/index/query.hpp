@@ -190,19 +190,24 @@ class SplitSingleQuery {
 };
 
 // Query-side prep for x+y quantization. No popcount/FastScan path here --
-// base and extra are estimated in one shot via generic SIMD dot kernels
-// (see estimator::xy_distance), so this just holds the rotated query and
-// the offset-binary correction term for the combined code.
+// both the base filter and the boosted refine step read their codes via
+// generic SIMD dot kernels (see xy_base_estdist / xy_fulldist_boosting), so
+// this just holds the rotated query and the two offset-binary corrections.
 template <typename T>
 class XYQuery {
    private:
     const T* rotated_query_;
     T G_add_ = 0;
     T G_error_ = 0;
+    T G_kbxSumq_base_ = 0;
     T G_kbxSumq_ = 0;
     MetricType metric_type_ = METRIC_L2;
 
    public:
+    // Carries both offset-binary corrections, since the two estimation
+    // layers read codes of different widths: the base-only estimate needs
+    // cb = -(2^base_bits - 1)/2, the combined estimate needs
+    // cb = -(2^(base_bits+extra_bits) - 1)/2. One query object serves both.
     explicit XYQuery(
         const T* rotated_query,
         size_t padded_dim,
@@ -213,14 +218,18 @@ class XYQuery {
         : rotated_query_(rotated_query) {
         metric_type_ = (metric_type == METRIC_IP) ? METRIC_IP : METRIC_L2;
 
+        float c_b_base = -static_cast<float>((1 << base_bits) - 1) / 2.F;
         float c_b = -static_cast<float>((1 << (base_bits + extra_bits)) - 1) / 2.F;
         T sumq =
             std::accumulate(rotated_query, rotated_query + padded_dim, static_cast<T>(0));
 
+        G_kbxSumq_base_ = sumq * c_b_base;
         G_kbxSumq_ = sumq * c_b;
     }
 
     [[nodiscard]] const T* rotated_query() const { return rotated_query_; }
+
+    [[nodiscard]] T kbxsumq_base() const { return G_kbxSumq_base_; }
 
     [[nodiscard]] T kbxsumq() const { return G_kbxSumq_; }
 

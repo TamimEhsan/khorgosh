@@ -75,8 +75,11 @@ inline HierarchicalNSW::HierarchicalNSW(
     ef_construction_ = std::max(ef_construction, M_);
     ef_ = 10;
 
-    size_xy_base_data_ = XYDataMap<float>::data_bytes(padded_dim_, base_bits_, 0);
-    size_xy_extra_data_ = XYDataMap<float>::data_bytes(padded_dim_, base_bits_, ex_bits_);
+    // base region: base_bits_ of code + 3 factors; extra region: ex_bits_ of
+    // code + 2 factors (zero-sized at ex_bits_ == 0). base_bits_ + ex_bits_
+    // bits per dimension in total -- the base code lives in exactly one place.
+    size_xy_base_data_ = XyBaseDataMap<float>::data_bytes(padded_dim_, base_bits_);
+    size_xy_extra_data_ = XyExtraDataMap<float>::data_bytes(padded_dim_, ex_bits_);
     size_links_level0_ = maxM0_ * sizeof(PID) + sizeof(PID);
     label_offset_ = size_links_level0_ + sizeof(PID);
     offsetXYBaseData_ = label_offset_ + sizeof(PID);
@@ -116,16 +119,15 @@ inline HierarchicalNSW::HierarchicalNSW(
 inline std::function<void(PID, PID, const float*)> HierarchicalNSW::make_xy_quantize_fn(
     bool faster
 ) {
-    quant::RabitqConfig base_config;
-    quant::RabitqConfig extra_config;
+    // One config, for the one code that gets built: the combined
+    // base_bits_ + ex_bits_ width. Both regions come out of that single
+    // quantization.
+    quant::RabitqConfig config;
     if (faster) {
-        base_config = quant::faster_config(padded_dim_, base_bits_);
-        extra_config = quant::faster_config(padded_dim_, base_bits_ + ex_bits_);
+        config = quant::faster_config(padded_dim_, base_bits_ + ex_bits_);
     }
-    return [this, base_config, extra_config](
-               PID cur_c, PID cluster_id, const float* rotated_data
-           ) {
-        quant::quantize_xy_two_layer(
+    return [this, config](PID cur_c, PID cluster_id, const float* rotated_data) {
+        quant::quantize_xy_single(
             rotated_data,
             reinterpret_cast<float*>(centroids_memory_) + (cluster_id * padded_dim_),
             padded_dim_,
@@ -134,31 +136,31 @@ inline std::function<void(PID, PID, const float*)> HierarchicalNSW::make_xy_quan
             get_xybasedata_by_internalid(cur_c),
             get_xyextradata_by_internalid(cur_c),
             metric_type_,
-            base_config,
-            extra_config
+            config
         );
     };
 }
 
-// Cheap filter (layer 1: base_bits_-only, extra_bits=0). Mirrors
-// get_bin_est_direct's shape but via the generic xy_distance path.
+// Cheap filter (base_bits_ code only). Mirrors get_bin_est_direct's shape,
+// generic SIMD dot in place of popcount. Leaves the base inner product in
+// res.ip_x0_qr for get_xyfull_est to boost -- exactly how the 1+y path
+// carries ip_x0_qr from the binary stage into split_distance_boosting.
 inline void HierarchicalNSW::get_xybase_est(
     std::vector<float>& q_to_centroids,
-    XYQuery<float>& query_base,
+    XYQuery<float>& query,
     PID currObj,
     HierarchicalNSW::EstimateRecord& res
 ) const {
     if (metric_type_ == METRIC_IP) {
         float norm = q_to_centroids[get_clusterid_by_internalid(currObj)];
         float error = q_to_centroids[get_clusterid_by_internalid(currObj) + num_cluster_];
-        xy_distance(
+        xy_base_estdist(
             get_xybasedata_by_internalid(currObj),
             xy_base_ip_func_,
-            nullptr,
-            query_base,
+            query,
             padded_dim_,
             base_bits_,
-            0,
+            res.ip_x0_qr,
             res.est_dist,
             res.low_dist,
             -norm,
@@ -166,14 +168,13 @@ inline void HierarchicalNSW::get_xybase_est(
         );
     } else {
         float norm = q_to_centroids[get_clusterid_by_internalid(currObj)];
-        xy_distance(
+        xy_base_estdist(
             get_xybasedata_by_internalid(currObj),
             xy_base_ip_func_,
-            nullptr,
-            query_base,
+            query,
             padded_dim_,
             base_bits_,
-            0,
+            res.ip_x0_qr,
             res.est_dist,
             res.low_dist,
             norm * norm,
@@ -182,45 +183,38 @@ inline void HierarchicalNSW::get_xybase_est(
     }
 }
 
-// Refinement (layer 2: base_bits_+ex_bits_). Mirrors get_full_est_direct.
+// Refinement to base_bits_+ex_bits_, via boosting: touches only the ex_bits_
+// code, since res.ip_x0_qr already holds this vector's base inner product
+// from get_xybase_est (every call site runs the filter stage first).
+//
+// Only res.est_dist is updated. res.low_dist keeps the filter stage's bound,
+// which is the one the search loop prunes on -- BoundedKNN orders and drops
+// candidates purely by est_dist, so a refined low_dist would be stored and
+// never read. This mirrors split_distance_boosting, which likewise returns
+// an estimate and no bound.
 inline void HierarchicalNSW::get_xyfull_est(
     std::vector<float>& q_to_centroids,
-    XYQuery<float>& query_full,
+    XYQuery<float>& query,
     PID currObj,
     HierarchicalNSW::EstimateRecord& res
 ) const {
+    float g_add = 0;
     if (metric_type_ == METRIC_IP) {
-        float norm = q_to_centroids[get_clusterid_by_internalid(currObj)];
-        float error = q_to_centroids[get_clusterid_by_internalid(currObj) + num_cluster_];
-        xy_distance(
-            get_xyextradata_by_internalid(currObj),
-            xy_base_ip_func_,
-            ip_func_,
-            query_full,
-            padded_dim_,
-            base_bits_,
-            ex_bits_,
-            res.est_dist,
-            res.low_dist,
-            -norm,
-            error
-        );
+        g_add = -q_to_centroids[get_clusterid_by_internalid(currObj)];
     } else {
         float norm = q_to_centroids[get_clusterid_by_internalid(currObj)];
-        xy_distance(
-            get_xyextradata_by_internalid(currObj),
-            xy_base_ip_func_,
-            ip_func_,
-            query_full,
-            padded_dim_,
-            base_bits_,
-            ex_bits_,
-            res.est_dist,
-            res.low_dist,
-            norm * norm,
-            norm
-        );
+        g_add = norm * norm;
     }
+
+    res.est_dist = xy_distance_boosting(
+        get_xyextradata_by_internalid(currObj),
+        ip_func_,
+        query,
+        padded_dim_,
+        ex_bits_,
+        res.ip_x0_qr,
+        g_add
+    );
 }
 
 // XY-mode counterpart of search_knn_direct<Kernel>'s body; called from
@@ -232,12 +226,13 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct_xy(
 ) {
     maxheap<std::pair<float, PID>> result;
 
-    XYQuery<float> query_base(rotated_query, padded_dim_, base_bits_, 0, metric_type_);
-    XYQuery<float> query_full(rotated_query, padded_dim_, base_bits_, ex_bits_, metric_type_);
+    // A single query object: it carries both offset-binary corrections, one
+    // per code width, so the filter and refine stages share it.
+    XYQuery<float> query(rotated_query, padded_dim_, base_bits_, ex_bits_, metric_type_);
 
     PID curr_obj = enterpoint_node_;
     EstimateRecord curest;
-    get_xybase_est(q_to_centroids, query_base, curr_obj, curest);
+    get_xybase_est(q_to_centroids, query, curr_obj, curest);
 
     for (int level = maxlevel_; level > 0; level--) {
         bool changed = true;
@@ -254,7 +249,7 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct_xy(
                 }
 
                 EstimateRecord candest;
-                get_xybase_est(q_to_centroids, query_base, cand, candest);
+                get_xybase_est(q_to_centroids, query, cand, candest);
 
                 if (candest.est_dist < curest.est_dist) {
                     curest = candest;
@@ -267,13 +262,7 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct_xy(
 
     BoundedKNN boundedKnn(TOPK);
     searchBaseLayerST_AdaptiveRerankOptDirectXY(
-        curr_obj,
-        std::max(ef_, TOPK),
-        TOPK,
-        query_base,
-        query_full,
-        q_to_centroids,
-        boundedKnn
+        curr_obj, std::max(ef_, TOPK), TOPK, query, q_to_centroids, boundedKnn
     );
     for (auto& candidate : boundedKnn.candidates()) {
         result.emplace(candidate.record.est_dist, get_external_label(candidate.id));
@@ -290,8 +279,7 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirectXY(
     PID ep_id,
     size_t ef,
     size_t TOPK,
-    XYQuery<float>& query_base,
-    XYQuery<float>& query_full,
+    XYQuery<float>& query,
     std::vector<float>& q_to_centroids,
     BoundedKNN& boundedKNN
 ) {
@@ -302,7 +290,12 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirectXY(
     float distk = 1e10;
 
     EstimateRecord start_estimate_record;
-    get_xyfull_est(q_to_centroids, query_full, ep_id, start_estimate_record);
+    // Filter stage first even for the entry point: get_xyfull_est boosts the
+    // base inner product this call leaves in ip_x0_qr.
+    get_xybase_est(q_to_centroids, query, ep_id, start_estimate_record);
+    if (ex_bits_ > 0) {
+        get_xyfull_est(q_to_centroids, query, ep_id, start_estimate_record);
+    }
     float est_dist = start_estimate_record.est_dist;
     float low_dist = start_estimate_record.low_dist;
 
@@ -313,7 +306,7 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirectXY(
 
     vl->set(ep_id);
 
-    const size_t prefetch_size = (((padded_dim_ / 8) + 63) / 64) + 1;
+    const size_t prefetch_size = ((size_xy_base_data_ + 63) / 64) + 1;
     const size_t prefetch_lookahead = 4;  // Number of neighbors to prefetch in advance.
 
     while (candidate_set.has_next()) {
@@ -343,14 +336,15 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirectXY(
             vl->set(candidate_id);
 
             EstimateRecord candest;
-            get_xybase_est(q_to_centroids, query_base, candidate_id, candest);
+            get_xybase_est(q_to_centroids, query, candidate_id, candest);
 
             bool flag_update_KNNs = boundedKNN.size() < TOPK || candest.low_dist < distk;
 
             if (flag_update_KNNs) {
-                // Compute the full estimate if promising.
+                // Boost to the full estimate if promising -- reuses
+                // candest.ip_x0_qr, so only the ex_bits_ code is touched.
                 if (ex_bits_ > 0) {
-                    get_xyfull_est(q_to_centroids, query_full, candidate_id, candest);
+                    get_xyfull_est(q_to_centroids, query, candidate_id, candest);
                 }
                 Candidate cand{
                     ResultRecord(candest.est_dist, candest.low_dist),

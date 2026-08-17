@@ -165,8 +165,10 @@ class HierarchicalNSW {
     static constexpr PID kMaxLabelOperationLock = 65536;
     // Bumped because save()/load() gained base_bits_/extra_bits_ and the
     // XY data region fields -- files saved before this must be rebuilt,
-    // load() rejects anything with a different version outright.
-    static constexpr uint32_t kFormatVersion = 2;
+    // load() rejects anything with a different version outright. Bumped
+    // again when the XY layout dropped its duplicated copy of the base code
+    // (the two regions changed size), so v2 files are also rejected.
+    static constexpr uint32_t kFormatVersion = 3;
     size_t max_elements_{0};
     mutable std::atomic<size_t> cur_element_count_{0};  // current number of elements
     size_t size_data_per_element_{0};
@@ -200,8 +202,8 @@ class HierarchicalNSW {
     // and the classic popcount/BinData/ExData path fully in play.
     // xy_mode_ -- NOT base_bits_ == 1 -- is what selects the storage path:
     // base_bits_ can legitimately be 1 via the XyQuantBits ctor too (a
-    // 1-bit XY base with y extra bits), which must still use XYDataMap, not
-    // BinDataMap/ExDataMap.
+    // 1-bit XY base with y extra bits), which must still use
+    // XyBaseDataMap/XyExtraDataMap, not BinDataMap/ExDataMap.
     bool xy_mode_{false};
     size_t base_bits_{1};
     size_t offsetXYBaseData_{0}, offsetXYExtraData_{0};
@@ -411,8 +413,7 @@ class HierarchicalNSW {
         PID ep_id,
         size_t ef,
         size_t TOPK,
-        XYQuery<float>& query_base,
-        XYQuery<float>& query_full,
+        XYQuery<float>& query,
         std::vector<float>& q_to_centroids,
         BoundedKNN& boundedKNN
     );
