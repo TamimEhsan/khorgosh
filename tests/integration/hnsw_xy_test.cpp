@@ -146,6 +146,33 @@ TEST(HnswXyIntegration, BaseBitsGreaterThanOneGivesReasonableRecall) {
     EXPECT_GT(recall, 0.5F);
 }
 
+// Where the split point falls must not change what is stored: 1+4, 3+2 and
+// 5+0 all encode the same 5-bit code, so their recall should land in the same
+// band. The old two-layer implementation could not satisfy this -- it
+// quantized twice with independently optimized scale factors, so the base
+// half of the refine layer disagreed with the filter layer's code.
+TEST(HnswXyIntegration, RecallIsStableAcrossSplitPointsAtEqualTotalBits) {
+    auto data = MakeData(5);
+    auto gt = BruteForceTopK(data, 10);
+
+    std::vector<std::pair<size_t, size_t>> splits = {{1, 4}, {2, 3}, {3, 2}, {5, 0}};
+    std::vector<float> recalls;
+    for (auto [x, y] : splits) {
+        HierarchicalNSW index(kNumPoints, kDim, XyQuantBits{x, y}, 16, 100);
+        index.construct(
+            1, data.centroid.data(), kNumPoints, data.base.data(), data.cluster_ids.data(), 1
+        );
+        auto results = index.search(data.queries.data(), kNumQueries, 10, 80, 1);
+        recalls.push_back(RecallAtK(results, gt));
+    }
+
+    float lo = *std::min_element(recalls.begin(), recalls.end());
+    float hi = *std::max_element(recalls.begin(), recalls.end());
+    EXPECT_GT(lo, 0.5F);
+    EXPECT_LT(hi - lo, 0.15F) << "recalls: " << recalls[0] << " " << recalls[1] << " "
+                              << recalls[2] << " " << recalls[3];
+}
+
 TEST(HnswXyIntegration, SaveLoadRoundTripXyMode) {
     auto data = MakeData(3);
     const char* path = "hnsw_xy_test_index.bin";
