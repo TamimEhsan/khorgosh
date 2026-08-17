@@ -2,9 +2,11 @@
 
 #include <omp.h>
 
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <vector>
 
 #include "rabitqlib/defines.hpp"
@@ -619,4 +621,94 @@ static inline void rabitq_full_impl(
     }
 }
 }  // namespace total_bits
+
+// Splits the same combined code total_bits::rabitq_full_impl already builds
+// (one real sign bit + cosine-optimized magnitude, unchanged) into a
+// base_bits/extra_bits pair instead of always 1/ex_bits. f_add/f_rescale/
+// f_error depend only on base_bits+extra_bits, and are meant to be used with
+// both codes together: ip(base)*2^extra_bits + ip(extra).
+//
+// base_bits == 1 is bit-for-bit identical to today's one_bit_code +
+// ex_bits_code_with_factor(ex_bits=extra_bits) (see xy_quantization_test.cpp).
+//
+// NOTE: best_rescale_factor()'s kTightStart table only covers magnitude
+// widths 0-8, so base_bits + extra_bits is capped at 9 for now.
+namespace xy_bits {
+
+constexpr size_t kMaxCombinedBits = 9;
+
+template <typename T, typename TP>
+inline void xy_split_code_with_factor(
+    const T* data,
+    const T* centroid,
+    size_t dim,
+    size_t base_bits,
+    size_t extra_bits,
+    TP* base_code,
+    TP* extra_code,
+    T& f_add,
+    T& f_rescale,
+    T& f_error,
+    MetricType metric_type = METRIC_L2,
+    double t_const = -1
+) {
+    assert(base_bits >= 1 && base_bits <= 8);
+    assert(extra_bits <= 8);
+    size_t total_bits = base_bits + extra_bits;
+    if (total_bits < 1 || total_bits > kMaxCombinedBits) {
+        std::cerr << "Bad base_bits/extra_bits combination in "
+                     "xy_split_code_with_factor(): base_bits + extra_bits must be in "
+                     "[1, "
+                  << kMaxCombinedBits << "]\n"
+                  << std::flush;
+        exit(1);
+    }
+
+    // total_code can need up to kMaxCombinedBits bits, independent of the
+    // caller's TP (typically uint8_t, sized for base_code/extra_code which
+    // are each <= 8 bits by construction).
+    std::vector<uint32_t> total_code(dim, 0);
+
+    if (total_bits == 1) {
+        // pure 1-bit case: no magnitude bits at all, use the dedicated
+        // 1-bit formula directly (same as one_bit_compact_code).
+        std::vector<int> binary_code(dim);
+        one_bit::one_bit_code_with_factor(
+            data, centroid, dim, binary_code.data(), f_add, f_rescale, f_error, metric_type
+        );
+        for (size_t i = 0; i < dim; ++i) {
+            total_code[i] = static_cast<uint32_t>(binary_code[i]);
+        }
+    } else {
+        size_t mag_bits = total_bits - 1;
+        std::vector<int> binary_code(dim);
+        one_bit::one_bit_code(data, centroid, dim, binary_code.data());
+        ex_bits::ex_bits_code_with_factor<T, uint32_t>(
+            data,
+            centroid,
+            dim,
+            mag_bits,
+            total_code.data(),
+            f_add,
+            f_rescale,
+            f_error,
+            metric_type,
+            t_const
+        );
+        for (size_t i = 0; i < dim; ++i) {
+            total_code[i] += static_cast<uint32_t>(binary_code[i]) << mag_bits;
+        }
+    }
+
+    uint32_t extra_mask =
+        (extra_bits > 0) ? static_cast<uint32_t>((1U << extra_bits) - 1) : 0U;
+    for (size_t i = 0; i < dim; ++i) {
+        base_code[i] = static_cast<TP>(total_code[i] >> extra_bits);
+        if (extra_bits > 0) {
+            extra_code[i] = static_cast<TP>(total_code[i] & extra_mask);
+        }
+    }
+}
+
+}  // namespace xy_bits
 }  // namespace rabitqlib::quant::rabitq_impl

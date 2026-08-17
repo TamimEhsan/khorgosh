@@ -246,6 +246,50 @@ inline void quantize_split_batch(
     }
 }
 
+// Generalized x+y quantizer: base_bits (1-8) + extra_bits (0-8), capped at
+// xy_bits::kMaxCombinedBits (9) combined. At base_bits == 1, equivalent to
+// quantize_split_single()'s ex_bits-only path (see xy_quantization_test.cpp).
+// Purely additive; quantize_split_single/quantize_split_batch are unchanged.
+inline void quantize_xy_single(
+    const float* data,
+    const float* centroid,
+    size_t padded_dim,
+    size_t base_bits,
+    size_t extra_bits,
+    char* xy_data,
+    MetricType metric_type = METRIC_L2,
+    RabitqConfig config = RabitqConfig()
+) {
+    XYDataMap<float> cur_xy(xy_data, padded_dim, base_bits, extra_bits);
+
+    std::vector<uint8_t> base_raw(padded_dim);
+    std::vector<uint8_t> extra_raw(extra_bits > 0 ? padded_dim : 0);
+
+    rabitq_impl::xy_bits::xy_split_code_with_factor<float, uint8_t>(
+        data,
+        centroid,
+        padded_dim,
+        base_bits,
+        extra_bits,
+        base_raw.data(),
+        extra_raw.data(),
+        cur_xy.f_add(),
+        cur_xy.f_rescale(),
+        cur_xy.f_error(),
+        metric_type,
+        config.t_const
+    );
+
+    rabitq_impl::ex_bits::packing_rabitqplus_code(
+        base_raw.data(), cur_xy.base_code(), padded_dim, base_bits
+    );
+    if (extra_bits > 0) {
+        rabitq_impl::ex_bits::packing_rabitqplus_code(
+            extra_raw.data(), cur_xy.extra_code(), padded_dim, extra_bits
+        );
+    }
+}
+
 inline void quantize_split_single(
     const float* data,
     const float* centroid,
