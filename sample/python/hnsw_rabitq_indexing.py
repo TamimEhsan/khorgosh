@@ -31,10 +31,13 @@ def main(args=None) -> None:
 
     # 3. Build HNSW index
     n, dim = data.shape
-    print(
-        f"\nBuilding HNSW index: n={n}, dim={dim}, M={args.degree}, "
-        f"ef={args.ef_construction}, bits={args.total_bits}, metric={args.metric}"
-    )
+    if args.base_bits is None:
+        print(f"\nBuilding HNSW index: n={n}, dim={dim}, M={args.degree}, "
+              f"ef={args.ef_construction}, bits={args.total_bits}, metric={args.metric}")
+    else:
+        print(f"\nBuilding HNSW index: n={n}, dim={dim}, M={args.degree}, "
+              f"ef={args.ef_construction}, base_bits={args.base_bits}, "
+              f"extra_bits={args.extra_bits or 0}, metric={args.metric}")
 
     idx = HnswIndex(
         dim=dim,
@@ -43,6 +46,8 @@ def main(args=None) -> None:
         ef_construction=args.ef_construction,
         nbits=args.total_bits,
         metric=args.metric,
+        base_bits=args.base_bits,
+        extra_bits=args.extra_bits,
     )
 
     t0 = time()
@@ -96,6 +101,8 @@ if __name__ == "__main__":
         default=TOTAL_BITS,
         help="Total number of bits for quantization",
     )
+    parser.add_argument("--base-bits", dest="base_bits", type=int, metavar="INT", default=None, help="Base bits for the new x+y quantization mode (1-8). Leave unset to use --total-bits with the classic 1-bit-base scheme")
+    parser.add_argument("--extra-bits", dest="extra_bits", type=int, metavar="INT", default=None, help="Extra/refinement bits for x+y quantization (0-8, default 0). Only used when --base-bits is set")
     parser.add_argument(
         "--metric",
         dest="metric",
