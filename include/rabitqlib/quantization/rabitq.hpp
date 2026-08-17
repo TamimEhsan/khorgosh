@@ -290,6 +290,38 @@ inline void quantize_xy_single(
     }
 }
 
+// Two-layer x+y quantization: a standalone base_bits-only layer (extra_bits
+// forced to 0, independently optimized -- the cheap-filter layer) plus the
+// full base_bits+extra_bits layer (the refinement layer). base_config and
+// extra_config are independent since they optimize different total
+// bit-widths (base_bits vs base_bits+extra_bits) and are not interchangeable.
+inline void quantize_xy_two_layer(
+    const float* data,
+    const float* centroid,
+    size_t padded_dim,
+    size_t base_bits,
+    size_t extra_bits,
+    char* xy_base_data,
+    char* xy_extra_data,
+    MetricType metric_type = METRIC_L2,
+    RabitqConfig base_config = RabitqConfig(),
+    RabitqConfig extra_config = RabitqConfig()
+) {
+    quantize_xy_single(
+        data, centroid, padded_dim, base_bits, 0, xy_base_data, metric_type, base_config
+    );
+    quantize_xy_single(
+        data,
+        centroid,
+        padded_dim,
+        base_bits,
+        extra_bits,
+        xy_extra_data,
+        metric_type,
+        extra_config
+    );
+}
+
 inline void quantize_split_single(
     const float* data,
     const float* centroid,
