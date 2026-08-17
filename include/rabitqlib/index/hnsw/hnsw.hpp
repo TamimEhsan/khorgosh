@@ -8,9 +8,11 @@
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -37,6 +39,15 @@ using minheap = std::priority_queue<T, std::vector<T>, std::greater<T>>;
 
 class HierarchicalNSW;
 
+// Tag type disambiguating the x+y constructor overload from the existing
+// (max_elements, dim, total_bits, M, ef_construction, ...) constructor --
+// a same-signature overload taking base_bits/extra_bits as plain size_t
+// would collide with it under overload resolution.
+struct XyQuantBits {
+    size_t base_bits;
+    size_t extra_bits;
+};
+
 namespace detail {
 
 maxheap<std::pair<float, PID>> search_knn_avx2(
@@ -59,11 +70,21 @@ class HierarchicalNSW {
     explicit HierarchicalNSW(
         size_t, size_t, size_t, size_t, size_t, size_t = 100, MetricType = METRIC_L2
     );
+    explicit HierarchicalNSW(
+        size_t,
+        size_t,
+        XyQuantBits,
+        size_t,
+        size_t,
+        size_t = 100,
+        MetricType = METRIC_L2
+    );
     ~HierarchicalNSW();
 
     [[nodiscard]] size_t dimension() const { return dim_; }
     [[nodiscard]] size_t num_clusters() const { return num_cluster_; }
-    [[nodiscard]] size_t nbits() const { return ex_bits_ + 1; }
+    [[nodiscard]] size_t base_bits() const { return base_bits_; }
+    [[nodiscard]] size_t nbits() const { return base_bits_ + ex_bits_; }
     [[nodiscard]] size_t M() const { return M_; }
     [[nodiscard]] size_t ef_construction() const { return ef_construction_; }
     [[nodiscard]] MetricType metric_type() const { return metric_type_; }
@@ -142,6 +163,10 @@ class HierarchicalNSW {
     );
 
     static constexpr PID kMaxLabelOperationLock = 65536;
+    // Bumped because save()/load() gained base_bits_/extra_bits_ and the
+    // XY data region fields -- files saved before this must be rebuilt,
+    // load() rejects anything with a different version outright.
+    static constexpr uint32_t kFormatVersion = 2;
     size_t max_elements_{0};
     mutable std::atomic<size_t> cur_element_count_{0};  // current number of elements
     size_t size_data_per_element_{0};
@@ -169,6 +194,19 @@ class HierarchicalNSW {
     size_t offsetBinData_{0}, offsetExData_{0}, label_offset_{0};
     size_t size_bin_data_{0}, size_ex_data_{0};
     size_t ex_bits_{0};
+
+    // XY-mode storage/search path fields (see XyQuantBits ctor). Unused
+    // (left zero/null) when xy_mode_ is false, which keeps the fields above
+    // and the classic popcount/BinData/ExData path fully in play.
+    // xy_mode_ -- NOT base_bits_ == 1 -- is what selects the storage path:
+    // base_bits_ can legitimately be 1 via the XyQuantBits ctor too (a
+    // 1-bit XY base with y extra bits), which must still use XYDataMap, not
+    // BinDataMap/ExDataMap.
+    bool xy_mode_{false};
+    size_t base_bits_{1};
+    size_t offsetXYBaseData_{0}, offsetXYExtraData_{0};
+    size_t size_xy_base_data_{0}, size_xy_extra_data_{0};
+    float (*xy_base_ip_func_)(const float*, const uint8_t*, size_t){nullptr};
 
     // Layout: (# of edges + edges) + (cluster_id) + (External_id) + (BinData) + (ExData)
     char* data_level0_memory_{nullptr};
@@ -272,6 +310,18 @@ class HierarchicalNSW {
         );
     }
 
+    char* get_xybasedata_by_internalid(PID internal_id) const {
+        return reinterpret_cast<char*>(
+            data_level0_memory_ + (internal_id * size_data_per_element_) + offsetXYBaseData_
+        );
+    }
+
+    char* get_xyextradata_by_internalid(PID internal_id) const {
+        return reinterpret_cast<char*>(
+            data_level0_memory_ + (internal_id * size_data_per_element_) + offsetXYExtraData_
+        );
+    }
+
     PID get_clusterid_by_internalid(PID internal_id) const {
         return *(reinterpret_cast<PID*>(
             data_level0_memory_ + (internal_id * size_data_per_element_) +
@@ -327,7 +377,21 @@ class HierarchicalNSW {
         std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
     ) const;
 
+    void get_xybase_est(
+        std::vector<float>&, XYQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
+    ) const;
+
+    void get_xyfull_est(
+        std::vector<float>&, XYQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
+    ) const;
+
     maxheap<std::pair<float, PID>> search_knn(const float*, size_t);
+
+    // XY-mode counterpart of search_knn_direct<Kernel>'s body; factored out
+    // (see hnsw_xy.hpp) so search_knn_direct itself stays a thin dispatch.
+    maxheap<std::pair<float, PID>> search_knn_direct_xy(
+        const float* rotated_query, size_t TOPK, std::vector<float>& q_to_centroids
+    );
 
     template <class Kernel>
     maxheap<std::pair<float, PID>> search_knn_direct(const float*, size_t);
@@ -343,6 +407,16 @@ class HierarchicalNSW {
         BoundedKNN& boundedKNN
     );
 
+    void searchBaseLayerST_AdaptiveRerankOptDirectXY(
+        PID ep_id,
+        size_t ef,
+        size_t TOPK,
+        XYQuery<float>& query_base,
+        XYQuery<float>& query_full,
+        std::vector<float>& q_to_centroids,
+        BoundedKNN& boundedKNN
+    );
+
     // Construction
     // Currently only support index construction with non-quantized vectors
     float get_data_dist(PID obj1, PID obj2) {
@@ -353,7 +427,15 @@ class HierarchicalNSW {
         );
     }
 
-    void add_point(PID, PID, const quant::RabitqConfig&);
+    // quantize_fn(cur_c, cluster_id, rotated_data) performs the actual
+    // quantization + storage step; construct() builds the right closure for
+    // the index's mode (base_bits_==1 vs XY) so add_point's link/level
+    // bookkeeping doesn't need to be duplicated per mode.
+    void add_point(PID, PID, const std::function<void(PID, PID, const float*)>&);
+
+    // Builds construct()'s quantize_fn closure for the XY mode (see
+    // hnsw_xy.hpp); construct() itself keeps its non-XY branch unchanged.
+    std::function<void(PID, PID, const float*)> make_xy_quantize_fn(bool faster);
 
     maxheap<std::pair<float, PID>> search_base_layer(PID, PID, int);
 
@@ -461,20 +543,28 @@ inline HierarchicalNSW::~HierarchicalNSW() { free_memory(); }
 inline void HierarchicalNSW::save(const char* filename) const {
     std::ofstream output(filename, std::ios::binary);
 
+    output.write(reinterpret_cast<const char*>(&kFormatVersion), sizeof(kFormatVersion));
+
     output.write(reinterpret_cast<const char*>(&max_elements_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&cur_element_count_), sizeof(size_t));
 
     output.write(reinterpret_cast<const char*>(&dim_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&padded_dim_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&num_cluster_), sizeof(size_t));
+    output.write(reinterpret_cast<const char*>(&xy_mode_), sizeof(bool));
+    output.write(reinterpret_cast<const char*>(&base_bits_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&ex_bits_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&metric_type_), sizeof(metric_type_));
 
     output.write(reinterpret_cast<const char*>(&size_bin_data_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&size_ex_data_), sizeof(size_t));
+    output.write(reinterpret_cast<const char*>(&size_xy_base_data_), sizeof(size_t));
+    output.write(reinterpret_cast<const char*>(&size_xy_extra_data_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&size_links_level0_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&offsetBinData_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&offsetExData_), sizeof(size_t));
+    output.write(reinterpret_cast<const char*>(&offsetXYBaseData_), sizeof(size_t));
+    output.write(reinterpret_cast<const char*>(&offsetXYExtraData_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&label_offset_), sizeof(PID));
     output.write(reinterpret_cast<const char*>(&size_data_per_element_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&size_links_per_element_), sizeof(size_t));
@@ -522,24 +612,46 @@ inline void HierarchicalNSW::load(const char* filename) {
 
     free_memory();
 
+    uint32_t format_version = 0;
+    input.read(reinterpret_cast<char*>(&format_version), sizeof(format_version));
+    if (format_version != kFormatVersion) {
+        throw std::runtime_error(
+            "HierarchicalNSW::load: unsupported index file format version (got " +
+            std::to_string(format_version) + ", expected " +
+            std::to_string(kFormatVersion) +
+            ") -- rebuild the index with the current library version"
+        );
+    }
+
     input.read(reinterpret_cast<char*>(&max_elements_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&cur_element_count_), sizeof(size_t));
 
     input.read(reinterpret_cast<char*>(&dim_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&padded_dim_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&num_cluster_), sizeof(size_t));
+    input.read(reinterpret_cast<char*>(&xy_mode_), sizeof(bool));
+    input.read(reinterpret_cast<char*>(&base_bits_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&ex_bits_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&metric_type_), sizeof(metric_type_));
     raw_dist_func_ =
         (metric_type_ == METRIC_IP) ? dot_product_dis<float> : euclidean_sqr<float>;
 
-    ip_func_ = select_excode_ipfunc(ex_bits_);
+    if (!xy_mode_) {
+        ip_func_ = select_excode_ipfunc(ex_bits_);
+    } else {
+        xy_base_ip_func_ = select_excode_ipfunc(base_bits_);
+        ip_func_ = (ex_bits_ > 0) ? select_excode_ipfunc(ex_bits_) : nullptr;
+    }
 
     input.read(reinterpret_cast<char*>(&size_bin_data_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&size_ex_data_), sizeof(size_t));
+    input.read(reinterpret_cast<char*>(&size_xy_base_data_), sizeof(size_t));
+    input.read(reinterpret_cast<char*>(&size_xy_extra_data_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&size_links_level0_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&offsetBinData_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&offsetExData_), sizeof(size_t));
+    input.read(reinterpret_cast<char*>(&offsetXYBaseData_), sizeof(size_t));
+    input.read(reinterpret_cast<char*>(&offsetXYExtraData_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&label_offset_), sizeof(PID));
     input.read(reinterpret_cast<char*>(&size_data_per_element_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&size_links_per_element_), sizeof(size_t));
@@ -637,9 +749,26 @@ inline void HierarchicalNSW::construct(
         );
     }
 
-    quant::RabitqConfig config;
-    if (faster) {
-        config = quant::faster_config(padded_dim_, ex_bits_ + 1);
+    std::function<void(PID, PID, const float*)> quantize_fn;
+    if (!xy_mode_) {
+        quant::RabitqConfig config;
+        if (faster) {
+            config = quant::faster_config(padded_dim_, ex_bits_ + 1);
+        }
+        quantize_fn = [this, config](PID cur_c, PID cluster_id, const float* rotated_data) {
+            quant::quantize_split_single(
+                rotated_data,
+                reinterpret_cast<float*>(centroids_memory_) + (cluster_id * padded_dim_),
+                padded_dim_,
+                ex_bits_,
+                get_bindata_by_internalid(cur_c),
+                get_exdata_by_internalid(cur_c),
+                metric_type_,
+                config
+            );
+        };
+    } else {
+        quantize_fn = make_xy_quantize_fn(faster);
     }
 
     std::cout << "Start HierarchicalNSW construction..." << '\n';
@@ -649,12 +778,14 @@ inline void HierarchicalNSW::construct(
         0,
         data_num,
         num_threads,
-        [&](size_t idx, size_t /*threadId*/) { add_point(idx, cluster_ids[idx], config); }
+        [&](size_t idx, size_t /*threadId*/) {
+            add_point(idx, cluster_ids[idx], quantize_fn);
+        }
     );
 }
 
 inline void HierarchicalNSW::add_point(
-    PID label, PID cluster_id, const quant::RabitqConfig& config
+    PID label, PID cluster_id, const std::function<void(PID, PID, const float*)>& quantize_fn
 ) {
     std::unique_lock<std::mutex> lock_label(get_lable_op_mutex(label));
 
@@ -704,16 +835,7 @@ inline void HierarchicalNSW::add_point(
     // Quantize raw data and initialize quantized data
     std::vector<float> rotated_data(padded_dim_);
     rotator_->rotate(rawDataPtr_ + (label * dim_), rotated_data.data());
-    quant::quantize_split_single(
-        rotated_data.data(),
-        reinterpret_cast<float*>(centroids_memory_) + (cluster_id * padded_dim_),
-        padded_dim_,
-        ex_bits_,
-        get_bindata_by_internalid(cur_c),
-        get_exdata_by_internalid(cur_c),
-        metric_type_,
-        config
-    );
+    quantize_fn(cur_c, cluster_id, rotated_data.data());
 
     // If the current vertex is at level >0, it needs some space to store the extra edges.
     if (curlevel > 0) {
@@ -806,6 +928,26 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_base_layer(
         }
         size_t size = get_list_count(reinterpret_cast<PID*>(data));
         auto* datal = reinterpret_cast<PID*>(data + 1);
+
+        if (cur_node_num >= cur_element_count_ || size > maxM0_) {
+            std::cerr << "BAD NODE: cur_node_num=" << cur_node_num
+                      << " cur_element_count_=" << cur_element_count_.load()
+                      << " size=" << size << " maxM0_=" << maxM0_
+                      << " layer=" << layer << " cur_c=" << cur_c << " ep_id=" << ep_id
+                      << "\n" << std::flush;
+            std::abort();
+        }
+        for (size_t dbg = 0; dbg < size; ++dbg) {
+            if (datal[dbg] >= cur_element_count_) {
+                std::cerr << "BAD NEIGHBOR: cur_node_num=" << cur_node_num
+                          << " idx=" << dbg << " datal[idx]=" << datal[dbg]
+                          << " cur_element_count_=" << cur_element_count_.load()
+                          << " size=" << size << " layer=" << layer
+                          << " cur_c=" << cur_c << " ep_id=" << ep_id
+                          << "\n" << std::flush;
+                std::abort();
+            }
+        }
 
         rabitqlib::memory::mem_prefetch_l1(
             reinterpret_cast<const char*>(
@@ -1129,10 +1271,6 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct(
         return result;
     }
 
-    SplitSingleQuery<float> query_wrapper(
-        rotated_query, padded_dim_, ex_bits_, query_config_, metric_type_
-    );
-
     // Preprocess - get the distance from query to all centroids
     std::vector<float> q_to_centroids(num_cluster_);
 
@@ -1160,6 +1298,14 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct(
             ));
         }
     }
+
+    if (xy_mode_) {
+        return search_knn_direct_xy(rotated_query, TOPK, q_to_centroids);
+    }
+
+    SplitSingleQuery<float> query_wrapper(
+        rotated_query, padded_dim_, ex_bits_, query_config_, metric_type_
+    );
 
     PID curr_obj = enterpoint_node_;
     EstimateRecord curest;
@@ -1309,3 +1455,5 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirect(
 }
 
 }  // namespace rabitqlib::hnsw
+
+#include "rabitqlib/index/hnsw/hnsw_xy.hpp"
