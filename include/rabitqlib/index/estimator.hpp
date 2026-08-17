@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 
 #include "rabitqlib/defines.hpp"
@@ -306,5 +307,41 @@ inline void split_single_estdist_direct(
 
     low_dist = est_dist - (cur_bin.f_error() * g_error);
 };
+
+/**
+ * @brief Distance estimation for x+y quantization (see rabitq_impl::xy_bits,
+ * quantize_xy_single). No popcount pre-filter: base and extra are both read
+ * via generic SIMD dot kernels and combined in one shot
+ * (ip(base)*2^extra_bits + ip(extra) == ip(total_code)).
+ *
+ * @param extra_ip_func may be nullptr when extra_bits == 0
+ */
+inline void xy_distance(
+    const char* xy_data,
+    float (*base_ip_func)(const float*, const uint8_t*, size_t),
+    float (*extra_ip_func)(const float*, const uint8_t*, size_t),
+    const XYQuery<float>& q_obj,
+    size_t padded_dim,
+    size_t base_bits,
+    size_t extra_bits,
+    float& est_dist,
+    float& low_dist,
+    float g_add,
+    float g_error
+) {
+    ConstXYDataMap<float> cur_xy(xy_data, padded_dim, base_bits, extra_bits);
+
+    float ip = std::ldexp(
+        base_ip_func(q_obj.rotated_query(), cur_xy.base_code(), padded_dim),
+        static_cast<int>(extra_bits)
+    );
+    if (extra_bits > 0) {
+        ip += extra_ip_func(q_obj.rotated_query(), cur_xy.extra_code(), padded_dim);
+    }
+
+    est_dist = cur_xy.f_add() + g_add + (cur_xy.f_rescale() * (ip + q_obj.kbxsumq()));
+
+    low_dist = est_dist - (cur_xy.f_error() * g_error);
+}
 
 }  // namespace rabitqlib
