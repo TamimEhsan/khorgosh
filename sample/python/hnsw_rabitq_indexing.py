@@ -27,8 +27,13 @@ def main(args=None) -> None:
 
     # 3. Build HNSW index
     n, dim = data.shape
-    print(f"\nBuilding HNSW index: n={n}, dim={dim}, M={args.degree}, "
-          f"ef={args.ef_construction}, bits={args.total_bits}, metric={args.metric}")
+    if args.base_bits is None:
+        print(f"\nBuilding HNSW index: n={n}, dim={dim}, M={args.degree}, "
+              f"ef={args.ef_construction}, bits={args.total_bits}, metric={args.metric}")
+    else:
+        print(f"\nBuilding HNSW index: n={n}, dim={dim}, M={args.degree}, "
+              f"ef={args.ef_construction}, base_bits={args.base_bits}, "
+              f"extra_bits={args.extra_bits or 0}, metric={args.metric}")
 
     idx = HnswIndex(
         dim=dim,
@@ -37,6 +42,8 @@ def main(args=None) -> None:
         ef_construction=args.ef_construction,
         nbits=args.total_bits,
         metric=args.metric,
+        base_bits=args.base_bits,
+        extra_bits=args.extra_bits,
     )
 
     t0 = time()
@@ -61,7 +68,9 @@ if __name__ == "__main__":
     parser.add_argument("--num-clusters", dest="num_clusters", type=int, metavar="INT", default=256, help="Number of clusters for quantization")
     parser.add_argument("--degree", dest="degree", type=int, metavar="INT", default=M, help="Degree bound for HNSW")
     parser.add_argument("--ef-construction", dest="ef_construction", type=int, metavar="INT", default=EF_CONSTRUCTION, help="EF parameter for index construction")
-    parser.add_argument("--total-bits", dest="total_bits", type=int, metavar="INT", default=TOTAL_BITS, help="Total number of bits for quantization")
+    parser.add_argument("--total-bits", dest="total_bits", type=int, metavar="INT", default=TOTAL_BITS, help="Total number of bits for quantization (classic 1-bit-base scheme; ignored if --base-bits is set)")
+    parser.add_argument("--base-bits", dest="base_bits", type=int, metavar="INT", default=None, help="Base bits for the new x+y quantization mode (1-8). Leave unset to use --total-bits with the classic 1-bit-base scheme")
+    parser.add_argument("--extra-bits", dest="extra_bits", type=int, metavar="INT", default=None, help="Extra/refinement bits for x+y quantization (0-8, default 0). Only used when --base-bits is set")
     parser.add_argument("--metric", dest="metric", type=str, default="l2", choices=["l2", "ip"], help="Distance metric (l2 or ip)")
     parser.add_argument("--faster-quant", dest="faster_quant", action="store_true", help="Use faster quantization method")
     parser.add_argument("--num-threads", dest="num_threads", type=int, metavar="INT", default=NUM_THREADS, help="Number of threads for building the index")

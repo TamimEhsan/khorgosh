@@ -15,6 +15,13 @@ namespace rabitqlib::python_bindings {
 
 class HnswIndex {
    public:
+    // base_bits/extra_bits are the new x+y quantization knobs (base_bits
+    // 1-8, extra_bits 0-8, base_bits+extra_bits <= 9). Leave both at their
+    // default of None to keep today's behavior unchanged: nbits is used as
+    // total_bits via the old (implicit base_bits=1) constructor, exactly as
+    // before. Passing base_bits switches to the new XyQuantBits{base_bits,
+    // extra_bits} constructor instead -- nbits is then ignored (the actual
+    // total bit count becomes base_bits + extra_bits).
     HnswIndex(
         size_t dim,
         size_t max_elements,
@@ -22,7 +29,9 @@ class HnswIndex {
         size_t ef_construction,
         size_t nbits,
         const std::string& metric = "l2",
-        size_t random_seed = 100
+        size_t random_seed = 100,
+        py::object base_bits = py::none(),
+        py::object extra_bits = py::none()
     )
         : dim_(dim)
         , max_elements_(max_elements)
@@ -30,16 +39,32 @@ class HnswIndex {
         , ef_construction_(ef_construction)
         , nbits_(nbits)
         , metric_(metric_from_string(metric))
-        , random_seed_(random_seed)
-        , index_(std::make_unique<rabitqlib::hnsw::HierarchicalNSW>(
-              max_elements,
-              dim,
-              nbits,
-              M,
-              ef_construction,
-              random_seed,
-              metric_
-          )) {}
+        , random_seed_(random_seed) {
+        if (base_bits.is_none()) {
+            if (!extra_bits.is_none()) {
+                throw std::invalid_argument(
+                    "base_bits must be provided when extra_bits is given"
+                );
+            }
+            index_ = std::make_unique<rabitqlib::hnsw::HierarchicalNSW>(
+                max_elements, dim, nbits, M, ef_construction, random_seed, metric_
+            );
+        } else {
+            size_t base_bits_val = base_bits.cast<size_t>();
+            size_t extra_bits_val = extra_bits.is_none() ? 0 : extra_bits.cast<size_t>();
+            index_ = std::make_unique<rabitqlib::hnsw::HierarchicalNSW>(
+                max_elements,
+                dim,
+                rabitqlib::hnsw::XyQuantBits{base_bits_val, extra_bits_val},
+                M,
+                ef_construction,
+                random_seed,
+                metric_
+            );
+        }
+        base_bits_ = index_->base_bits();
+        nbits_ = index_->nbits();
+    }
 
     void build(
         py::handle data,
@@ -134,6 +159,7 @@ class HnswIndex {
         wrapper.M_ = wrapper.index_->M();
         wrapper.ef_construction_ = wrapper.index_->ef_construction();
         wrapper.nbits_ = wrapper.index_->nbits();
+        wrapper.base_bits_ = wrapper.index_->base_bits();
         wrapper.num_clusters_ = wrapper.index_->num_clusters();
         wrapper.metric_ = wrapper.index_->metric_type();
         wrapper.built_ = true;
@@ -143,6 +169,11 @@ class HnswIndex {
     [[nodiscard]] size_t dim() const { return dim_; }
     [[nodiscard]] size_t max_elements() const { return max_elements_; }
     [[nodiscard]] size_t nbits() const { return nbits_; }
+    // base_bits == 1 and extra_bits == nbits - 1 for indexes built the old
+    // way (base_bits left as None); both are always meaningful post-build
+    // or post-load, since HierarchicalNSW::base_bits() defaults to 1.
+    [[nodiscard]] size_t base_bits() const { return base_bits_; }
+    [[nodiscard]] size_t extra_bits() const { return nbits_ - base_bits_; }
     [[nodiscard]] bool is_built() const { return built_; }
     [[nodiscard]] size_t num_clusters() const { return num_clusters_; }
     [[nodiscard]] std::string metric() const { return metric_to_string(metric_); }
@@ -155,6 +186,7 @@ class HnswIndex {
     size_t M_ = 0;
     size_t ef_construction_ = 0;
     size_t nbits_ = 0;
+    size_t base_bits_ = 1;
     rabitqlib::MetricType metric_ = rabitqlib::METRIC_L2;
     size_t random_seed_ = 100;
     size_t num_clusters_ = 0;
@@ -169,14 +201,25 @@ void register_hnsw(py::module_ &m) {
     using namespace rabitqlib::python_bindings;
 
     py::class_<HnswIndex>(m, "HnswIndex")
-        .def(py::init<size_t, size_t, size_t, size_t, size_t, const std::string&, size_t>(),
+        .def(py::init<
+                 size_t,
+                 size_t,
+                 size_t,
+                 size_t,
+                 size_t,
+                 const std::string&,
+                 size_t,
+                 py::object,
+                 py::object>(),
              py::arg("dim"),
              py::arg("max_elements"),
              py::arg("M") = 16,
              py::arg("ef_construction") = 200,
              py::arg("nbits") = 8,
              py::arg("metric") = "l2",
-             py::arg("random_seed") = 100)
+             py::arg("random_seed") = 100,
+             py::arg("base_bits") = py::none(),
+             py::arg("extra_bits") = py::none())
         .def("build", &HnswIndex::build,
              py::arg("data"),
              py::arg("centroids"),
@@ -193,6 +236,8 @@ void register_hnsw(py::module_ &m) {
         .def_property_readonly("dim", &HnswIndex::dim)
         .def_property_readonly("max_elements", &HnswIndex::max_elements)
         .def_property_readonly("nbits", &HnswIndex::nbits)
+        .def_property_readonly("base_bits", &HnswIndex::base_bits)
+        .def_property_readonly("extra_bits", &HnswIndex::extra_bits)
         .def_property_readonly("num_clusters", &HnswIndex::num_clusters)
         .def_property_readonly("is_built", &HnswIndex::is_built)
         .def_property_readonly("metric", &HnswIndex::metric);
