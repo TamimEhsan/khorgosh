@@ -14,6 +14,26 @@
 using namespace rabitqlib;
 using namespace rabitq_test;
 
+// ex_bits == 0 means there is no ex region at all: ExDataMap::data_bytes(dim, 0)
+// is 0, so a real kernel in slot 0 would read dim/8 bytes past a zero-length
+// block. It must return 0 instead -- which is also the value that makes the
+// shared full-distance formula collapse onto the 1-bit estimate.
+TEST(Select_IP_Func, zero_ex_bits_reads_nothing_and_returns_zero) {
+    auto ip_func = select_excode_ipfunc(0);
+    ASSERT_NE(ip_func, nullptr);
+
+    // Deliberately pass a null code pointer: slot 0 must not dereference it.
+    std::vector<float> query(64, 1.0F);
+    EXPECT_EQ(ip_func(query.data(), nullptr, 64), 0.0F);
+
+    // And it must ignore whatever bytes happen to follow a zero-length region.
+    std::vector<uint8_t> garbage(64, 0xFF);
+    EXPECT_EQ(ip_func(query.data(), garbage.data(), 64), 0.0F);
+
+    // Distinct from the 1-bit kernel, which is what slot 0 used to alias.
+    EXPECT_NE(ip_func, select_excode_ipfunc(1));
+}
+
 TEST(Select_IP_Func, returns_stable_function_pointer) {
     auto ip_func = select_excode_ipfunc(0);
     ASSERT_NE(ip_func, nullptr);
