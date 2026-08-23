@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 
 #include "rabitqlib/defines.hpp"
@@ -270,5 +271,110 @@ inline void split_single_estdist_direct(
 
     low_dist = est_dist - (cur_bin.f_error() * g_error);
 };
+
+/**
+ * @brief Cheap filter stage of x+y quantization: estimate using the base
+ * (top base_bits) code alone. Counterpart of split_single_estdist_direct in
+ * the 1+y path, with a generic SIMD dot kernel in place of popcount.
+ *
+ * @param ip_base out: <rotated_query, base_code>, to be fed straight into
+ *                xy_fulldist_boosting so the refine stage doesn't recompute it
+ */
+inline void xy_base_estdist(
+    const char* xy_base_data,
+    float (*base_ip_func)(const float*, const uint8_t*, size_t),
+    const XYQuery<float>& q_obj,
+    size_t padded_dim,
+    size_t base_bits,
+    float& ip_base,
+    float& est_dist,
+    float& low_dist,
+    float g_add,
+    float g_error
+) {
+    ConstBaseDataMap<float> cur_base(xy_base_data, padded_dim, base_bits);
+
+    ip_base = base_ip_func(q_obj.rotated_query(), cur_base.base_code(), padded_dim);
+
+    est_dist =
+        cur_base.f_add() + g_add + (cur_base.f_rescale() * (ip_base + q_obj.kbxsumq_base()));
+
+    low_dist = est_dist - (cur_base.f_error() * g_error);
+}
+
+/**
+ * @brief Refine stage of x+y quantization: boost the base estimate to the
+ * full (base_bits+extra_bits)-bit estimate by reusing the base inner product
+ * the filter stage already computed. Exactly the boosting identity
+ * split_distance_boosting uses, generalized from 1 base bit to base_bits:
+ *
+ *   ip(total_code) == ip(base_code) * 2^extra_bits + ip(extra_code)
+ *
+ * so only the extra_bits code is touched -- the base region is not read at
+ * all. Like split_distance_boosting, this returns the estimate alone and
+ * computes no lower bound: the bound that governs pruning is the filter
+ * stage's, and a refined one would need the base region's f_error.
+ *
+ * @param ip_base value produced by xy_base_estdist for this same vector
+ */
+inline float xy_distance_boosting(
+    const char* xy_extra_data,
+    float (*extra_ip_func)(const float*, const uint8_t*, size_t),
+    const XYQuery<float>& q_obj,
+    size_t padded_dim,
+    size_t extra_bits,
+    float ip_base,
+    float g_add
+) {
+    ConstExDataMap<float> cur_extra(xy_extra_data, padded_dim, extra_bits);
+
+    float ip = (static_cast<float>(1 << extra_bits) * ip_base) +
+               extra_ip_func(q_obj.rotated_query(), cur_extra.ex_code(), padded_dim);
+
+    return cur_extra.f_add_ex() + g_add + (cur_extra.f_rescale_ex() * (ip + q_obj.kbxsumq()));
+}
+
+/**
+ * @brief One-shot full x+y estimate: reads both regions, computes the base
+ * inner product itself, and produces the estimate together with a lower
+ * bound. Counterpart of split_single_fulldist_direct, for callers that don't
+ * already hold an ip_base from a filter pass or that need low_dist.
+ *
+ * Callers that have just run xy_base_estdist should prefer
+ * xy_distance_boosting, which reuses that pass's ip_base instead of
+ * recomputing it. As in split_single_fulldist_direct, the error bound is the
+ * base layer's f_error scaled down by 2^extra_bits.
+ *
+ * @param ip_base out: <rotated_query, base_code>
+ */
+inline void xy_single_fulldist(
+    const char* xy_base_data,
+    const char* xy_extra_data,
+    float (*base_ip_func)(const float*, const uint8_t*, size_t),
+    float (*extra_ip_func)(const float*, const uint8_t*, size_t),
+    const XYQuery<float>& q_obj,
+    size_t padded_dim,
+    size_t base_bits,
+    size_t extra_bits,
+    float& est_dist,
+    float& low_dist,
+    float& ip_base,
+    float g_add,
+    float g_error
+) {
+    ConstBaseDataMap<float> cur_base(xy_base_data, padded_dim, base_bits);
+    ConstExDataMap<float> cur_extra(xy_extra_data, padded_dim, extra_bits);
+
+    ip_base = base_ip_func(q_obj.rotated_query(), cur_base.base_code(), padded_dim);
+
+    float ip = (static_cast<float>(1 << extra_bits) * ip_base) +
+               extra_ip_func(q_obj.rotated_query(), cur_extra.ex_code(), padded_dim);
+
+    est_dist =
+        cur_extra.f_add_ex() + g_add + (cur_extra.f_rescale_ex() * (ip + q_obj.kbxsumq()));
+
+    low_dist =
+        est_dist - (cur_base.f_error() * g_error / static_cast<float>(1 << extra_bits));
+}
 
 }  // namespace rabitqlib
