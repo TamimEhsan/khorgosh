@@ -201,7 +201,7 @@ class HierarchicalNSW {
     // xy_mode_ -- NOT base_bits_ == 1 -- is what selects the storage path:
     // base_bits_ can legitimately be 1 via the XyQuantBits ctor too (a
     // 1-bit XY base with y extra bits), which must still use
-    // XyBaseDataMap/XyExtraDataMap, not BinDataMap/ExDataMap.
+    // BaseDataMap/ExDataMap, not BinDataMap/ExDataMap.
     bool xy_mode_{false};
     size_t base_bits_{1};
     size_t offsetXYBaseData_{0}, offsetXYExtraData_{0};

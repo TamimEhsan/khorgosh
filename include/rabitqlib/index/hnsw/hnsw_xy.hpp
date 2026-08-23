@@ -78,8 +78,8 @@ inline HierarchicalNSW::HierarchicalNSW(
     // base region: base_bits_ of code + 3 factors; extra region: ex_bits_ of
     // code + 2 factors (zero-sized at ex_bits_ == 0). base_bits_ + ex_bits_
     // bits per dimension in total -- the base code lives in exactly one place.
-    size_xy_base_data_ = XyBaseDataMap<float>::data_bytes(padded_dim_, base_bits_);
-    size_xy_extra_data_ = XyExtraDataMap<float>::data_bytes(padded_dim_, ex_bits_);
+    size_xy_base_data_ = BaseDataMap<float>::data_bytes(padded_dim_, base_bits_);
+    size_xy_extra_data_ = ExDataMap<float>::data_bytes(padded_dim_, ex_bits_);
     size_links_level0_ = maxM0_ * sizeof(PID) + sizeof(PID);
     label_offset_ = size_links_level0_ + sizeof(PID);
     offsetXYBaseData_ = label_offset_ + sizeof(PID);
@@ -283,7 +283,7 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirectXY(
     std::vector<float>& q_to_centroids,
     BoundedKNN& boundedKNN
 ) {
-    HashBasedBooleanSet* vl = visited_list_pool_->get_free_vislist();
+    VisitedSet* vl = visited_list_pool_->get_free_vislist();
 
     buffer::SearchBuffer<float> candidate_set(ef);
 

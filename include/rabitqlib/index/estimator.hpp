@@ -328,7 +328,7 @@ inline void xy_base_estdist(
     float g_add,
     float g_error
 ) {
-    ConstXyBaseDataMap<float> cur_base(xy_base_data, padded_dim, base_bits);
+    ConstBaseDataMap<float> cur_base(xy_base_data, padded_dim, base_bits);
 
     ip_base = base_ip_func(q_obj.rotated_query(), cur_base.base_code(), padded_dim);
 
@@ -362,10 +362,10 @@ inline float xy_distance_boosting(
     float ip_base,
     float g_add
 ) {
-    ConstXyExtraDataMap<float> cur_extra(xy_extra_data, padded_dim, extra_bits);
+    ConstExDataMap<float> cur_extra(xy_extra_data, padded_dim, extra_bits);
 
     float ip = (static_cast<float>(1 << extra_bits) * ip_base) +
-               extra_ip_func(q_obj.rotated_query(), cur_extra.extra_code(), padded_dim);
+               extra_ip_func(q_obj.rotated_query(), cur_extra.ex_code(), padded_dim);
 
     return cur_extra.f_add_ex() + g_add + (cur_extra.f_rescale_ex() * (ip + q_obj.kbxsumq()));
 }
@@ -398,13 +398,13 @@ inline void xy_single_fulldist(
     float g_add,
     float g_error
 ) {
-    ConstXyBaseDataMap<float> cur_base(xy_base_data, padded_dim, base_bits);
-    ConstXyExtraDataMap<float> cur_extra(xy_extra_data, padded_dim, extra_bits);
+    ConstBaseDataMap<float> cur_base(xy_base_data, padded_dim, base_bits);
+    ConstExDataMap<float> cur_extra(xy_extra_data, padded_dim, extra_bits);
 
     ip_base = base_ip_func(q_obj.rotated_query(), cur_base.base_code(), padded_dim);
 
     float ip = (static_cast<float>(1 << extra_bits) * ip_base) +
-               extra_ip_func(q_obj.rotated_query(), cur_extra.extra_code(), padded_dim);
+               extra_ip_func(q_obj.rotated_query(), cur_extra.ex_code(), padded_dim);
 
     est_dist =
         cur_extra.f_add_ex() + g_add + (cur_extra.f_rescale_ex() * (ip + q_obj.kbxsumq()));

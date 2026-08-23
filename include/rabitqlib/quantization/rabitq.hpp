@@ -270,45 +270,17 @@ inline void quantize_xy_single(
     MetricType metric_type = METRIC_L2,
     RabitqConfig config = RabitqConfig()
 ) {
-    XyBaseDataMap<float> cur_base(xy_base_data, padded_dim, base_bits);
-
-    std::vector<uint8_t> base_raw(padded_dim);
-    std::vector<uint8_t> extra_raw(extra_bits > 0 ? padded_dim : 0);
-
-    float f_add_full = 0;
-    float f_rescale_full = 0;
-    float f_error_full = 0;
-
-    rabitq_impl::xy_bits::xy_split_code_with_factor<float, uint8_t>(
+    rabitq_impl::xy_bits::xy_split_code_with_factor<float>(
         data,
         centroid,
         padded_dim,
         base_bits,
         extra_bits,
-        base_raw.data(),
-        extra_raw.data(),
-        cur_base.f_add(),
-        cur_base.f_rescale(),
-        cur_base.f_error(),
-        f_add_full,
-        f_rescale_full,
-        f_error_full,
+        xy_base_data,
+        xy_extra_data,
         metric_type,
         config.t_const
     );
-
-    rabitq_impl::ex_bits::packing_rabitqplus_code(
-        base_raw.data(), cur_base.base_code(), padded_dim, base_bits
-    );
-
-    if (extra_bits > 0) {
-        XyExtraDataMap<float> cur_extra(xy_extra_data, padded_dim, extra_bits);
-        rabitq_impl::ex_bits::packing_rabitqplus_code(
-            extra_raw.data(), cur_extra.extra_code(), padded_dim, extra_bits
-        );
-        cur_extra.f_add_ex() = f_add_full;
-        cur_extra.f_rescale_ex() = f_rescale_full;
-    }
 }
 
 inline void quantize_split_single(

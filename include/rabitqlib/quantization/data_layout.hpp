@@ -143,14 +143,16 @@ struct ConstExDataMap {
     const T& f_recale_ex_;
 };
 
-// Base (x-bit) layer of an x+y quantized vector: the top base_bits of the
-// combined code, packed via pack_excode, plus its own three factors. This is
-// the cheap filter layer, and it plays exactly the role BinDataMap plays in
-// the 1+y layout -- which is what it collapses to at base_bits == 1.
+// Base layer of a split-code vector: the top base_bits of the combined code,
+// packed via pack_excode, plus its own three factors. This is the cheap filter
+// layer, and it plays exactly the role BinDataMap plays in the 1+y layout --
+// which is what it collapses to at base_bits == 1. The refine layer that pairs
+// with it is ExDataMap: the bottom extra_bits of the *same* combined code
+// (never a second copy of the base bits), plus that code's f_add/f_rescale.
 template <typename T>
-struct XyBaseDataMap {
+struct BaseDataMap {
    public:
-    explicit XyBaseDataMap(char* data, size_t padded_dim, size_t base_bits)
+    explicit BaseDataMap(char* data, size_t padded_dim, size_t base_bits)
         : base_code_(reinterpret_cast<uint8_t*>(data))
         , f_add_(*reinterpret_cast<T*>(data + (padded_dim * base_bits / 8)))
         , f_rescale_(*(reinterpret_cast<T*>(data + (padded_dim * base_bits / 8)) + 1))
@@ -173,9 +175,9 @@ struct XyBaseDataMap {
 };
 
 template <typename T>
-struct ConstXyBaseDataMap {
+struct ConstBaseDataMap {
    public:
-    explicit ConstXyBaseDataMap(const char* data, size_t padded_dim, size_t base_bits)
+    explicit ConstBaseDataMap(const char* data, size_t padded_dim, size_t base_bits)
         : base_code_(reinterpret_cast<const uint8_t*>(data))
         , f_add_(*reinterpret_cast<const T*>(data + (padded_dim * base_bits / 8)))
         , f_rescale_(
@@ -194,54 +196,6 @@ struct ConstXyBaseDataMap {
     const T& f_add_;
     const T& f_rescale_;
     const T& f_error_;
-};
-
-// Extra (y-bit) layer of an x+y quantized vector: the bottom extra_bits of
-// the *same* combined code (never a second copy of the base bits), plus the
-// combined code's f_add/f_rescale. The refine step's error bound comes from
-// the base layer's f_error / 2^extra_bits, so no third float is stored here
-// -- identical in shape to ExDataMap. Zero-sized when extra_bits == 0.
-template <typename T>
-struct XyExtraDataMap {
-   public:
-    explicit XyExtraDataMap(char* data, size_t padded_dim, size_t extra_bits)
-        : extra_code_(reinterpret_cast<uint8_t*>(data))
-        , f_add_ex_(*reinterpret_cast<T*>(data + (padded_dim * extra_bits / 8)))
-        , f_rescale_ex_(*(reinterpret_cast<T*>(data + (padded_dim * extra_bits / 8)) + 1)) {
-    }
-
-    static size_t data_bytes(size_t padded_dim, size_t extra_bits) {
-        return extra_bits > 0 ? (padded_dim * extra_bits / 8) + (sizeof(T) * 2) : 0;
-    }
-
-    [[nodiscard]] uint8_t* extra_code() { return extra_code_; }
-    [[nodiscard]] T& f_add_ex() { return f_add_ex_; }
-    [[nodiscard]] T& f_rescale_ex() { return f_rescale_ex_; }
-
-   private:
-    uint8_t* extra_code_;
-    T& f_add_ex_;
-    T& f_rescale_ex_;
-};
-
-template <typename T>
-struct ConstXyExtraDataMap {
-   public:
-    explicit ConstXyExtraDataMap(const char* data, size_t padded_dim, size_t extra_bits)
-        : extra_code_(reinterpret_cast<const uint8_t*>(data))
-        , f_add_ex_(*reinterpret_cast<const T*>(data + (padded_dim * extra_bits / 8)))
-        , f_rescale_ex_(
-              *(reinterpret_cast<const T*>(data + (padded_dim * extra_bits / 8)) + 1)
-          ) {}
-
-    [[nodiscard]] const uint8_t* extra_code() const { return extra_code_; }
-    [[nodiscard]] const T& f_add_ex() const { return f_add_ex_; }
-    [[nodiscard]] const T& f_rescale_ex() const { return f_rescale_ex_; }
-
-   private:
-    const uint8_t* extra_code_;
-    const T& f_add_ex_;
-    const T& f_rescale_ex_;
 };
 
 template <typename T>

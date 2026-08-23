@@ -11,6 +11,7 @@
 
 #include "rabitqlib/defines.hpp"
 #include "rabitqlib/fastscan/fastscan.hpp"
+#include "rabitqlib/quantization/data_layout.hpp"
 #include "rabitqlib/quantization/pack_excode.hpp"
 #include "rabitqlib/utils/space.hpp"
 
@@ -751,21 +752,34 @@ inline void code_factors(
     }
 }
 
-template <typename T, typename TP>
+/**
+ * @brief Quantize one vector into a (base_bits + extra_bits)-bit code and write
+ *        both layers, with their factors, straight into their data blocks.
+ *
+ * The code is produced once and split: xy_base_data receives the top base_bits
+ * (the filter layer) and xy_extra_data the bottom extra_bits (the refine
+ * layer). Both layers' factors come from the same shared derivation,
+ * code_factors(), applied to two different code widths -- the base code alone,
+ * and the combined code -- so the two layers stay algebraically consistent by
+ * construction rather than by two separate implementations agreeing.
+ *
+ * @param xy_base_data  destination block, BaseDataMap layout
+ * @param xy_extra_data destination block, ExDataMap layout; may be nullptr
+ *                      when extra_bits == 0
+ *
+ * @note The combined code's f_error is computed but not returned: ExDataMap has
+ *       no slot for it and the refine step derives its bound from the base
+ *       layer's f_error / 2^extra_bits instead.
+ */
+template <typename T>
 inline void xy_split_code_with_factor(
     const T* data,
     const T* centroid,
     size_t dim,
     size_t base_bits,
     size_t extra_bits,
-    TP* base_code,
-    TP* extra_code,
-    T& f_add_base,
-    T& f_rescale_base,
-    T& f_error_base,
-    T& f_add_full,
-    T& f_rescale_full,
-    T& f_error_full,
+    char* xy_base_data,
+    char* xy_extra_data,
     MetricType metric_type = METRIC_L2,
     double t_const = -1
 ) {
@@ -781,84 +795,78 @@ inline void xy_split_code_with_factor(
         exit(1);
     }
 
-    // total_code can need up to kMaxCombinedBits bits, independent of the
-    // caller's TP (typically uint8_t, sized for base_code/extra_code which
-    // are each <= 8 bits by construction).
-    std::vector<uint32_t> total_code(dim, 0);
-
-    if (total_bits == 1) {
-        // pure 1-bit case: no magnitude bits at all, use the dedicated
-        // 1-bit formula directly (same as one_bit_compact_code).
-        std::vector<int> binary_code(dim);
-        one_bit::one_bit_code_with_factor(
-            data,
-            centroid,
-            dim,
-            binary_code.data(),
-            f_add_full,
-            f_rescale_full,
-            f_error_full,
-            metric_type
-        );
-        for (size_t i = 0; i < dim; ++i) {
-            total_code[i] = static_cast<uint32_t>(binary_code[i]);
-        }
-    } else {
-        size_t mag_bits = total_bits - 1;
-        std::vector<int> binary_code(dim);
-        one_bit::one_bit_code(data, centroid, dim, binary_code.data());
-        ex_bits::ex_bits_code_with_factor<T, uint32_t>(
-            data,
-            centroid,
-            dim,
-            mag_bits,
-            total_code.data(),
-            f_add_full,
-            f_rescale_full,
-            f_error_full,
-            metric_type,
-            t_const
-        );
-        for (size_t i = 0; i < dim; ++i) {
-            total_code[i] += static_cast<uint32_t>(binary_code[i]) << mag_bits;
-        }
-    }
-
-    uint32_t extra_mask =
-        (extra_bits > 0) ? static_cast<uint32_t>((1U << extra_bits) - 1) : 0U;
-    std::vector<int> base_code_int(dim);
-    for (size_t i = 0; i < dim; ++i) {
-        uint32_t base_val = total_code[i] >> extra_bits;
-        base_code_int[i] = static_cast<int>(base_val);
-        base_code[i] = static_cast<TP>(base_val);
-        if (extra_bits > 0) {
-            extra_code[i] = static_cast<TP>(total_code[i] & extra_mask);
-        }
-    }
-
-    if (extra_bits == 0) {
-        // Base code *is* the whole code; no second derivation needed, and
-        // sharing the factors keeps the two layers exactly consistent.
-        f_add_base = f_add_full;
-        f_rescale_base = f_rescale_full;
-        f_error_base = f_error_full;
-        return;
-    }
-
-    ConstRowMajorArrayMap<T> data_arr(data, 1, dim);
-    ConstRowMajorArrayMap<T> cent_arr(centroid, 1, dim);
+    ConstRowMajorArrayMap<T> data_arr(data, 1, static_cast<long>(dim));
+    ConstRowMajorArrayMap<T> cent_arr(centroid, 1, static_cast<long>(dim));
     RowMajorArray<T> residual_arr = data_arr - cent_arr;
+    const T* residual = residual_arr.data();
 
+    // One sign bit plus mag_bits of magnitude makes up the combined code.
+    const size_t mag_bits = total_bits - 1;
+    std::vector<uint8_t> mag_code(dim, 0);
+
+    if (mag_bits > 0) {
+        ex_bits::ex_bits_code<T, uint8_t>(
+            residual, dim, mag_bits, mag_code.data(), t_const
+        );
+    }
+
+    std::vector<int> total_code(dim);
+    for (size_t i = 0; i < dim; ++i) {
+        total_code[i] = static_cast<int>(mag_code[i]) +
+                        (static_cast<int>(residual[i] >= 0) << mag_bits);
+    }
+
+    const auto extra_mask =
+        (extra_bits > 0) ? static_cast<int>((1U << extra_bits) - 1) : 0;
+    std::vector<uint8_t> base_raw(dim);
+    std::vector<int> base_code_int(dim);
+    std::vector<uint8_t> extra_raw(extra_bits > 0 ? dim : 0);
+    for (size_t i = 0; i < dim; ++i) {
+        int base_val = total_code[i] >> extra_bits;
+        base_code_int[i] = base_val;
+        base_raw[i] = static_cast<uint8_t>(base_val);
+        if (extra_bits > 0) {
+            extra_raw[i] = static_cast<uint8_t>(total_code[i] & extra_mask);
+        }
+    }
+
+    // Base layer first: its factors describe the filter code on its own.
+    BaseDataMap<T> base_map(xy_base_data, dim, base_bits);
     code_factors<T>(
-        residual_arr.data(),
+        residual,
         centroid,
         dim,
         base_code_int.data(),
         -(static_cast<float>((1U << base_bits) - 1) / 2.F),
-        f_add_base,
-        f_rescale_base,
-        f_error_base,
+        base_map.f_add(),
+        base_map.f_rescale(),
+        base_map.f_error(),
         metric_type
+    );
+    ex_bits::packing_rabitqplus_code(base_raw.data(), base_map.base_code(), dim, base_bits);
+
+    if (extra_bits == 0) {
+        // The base code is the whole code, so the two factor sets coincide.
+        return;
+    }
+
+    // Refine layer: the same derivation over the combined code.
+    ExDataMap<T> extra_map(xy_extra_data, dim, extra_bits);
+    T f_error_ex = 0;
+    code_factors<T>(
+        residual,
+        centroid,
+        dim,
+        total_code.data(),
+        -(static_cast<float>((1U << total_bits) - 1) / 2.F),
+        extra_map.f_add_ex(),
+        extra_map.f_rescale_ex(),
+        f_error_ex,
+        metric_type
+    );
+
+    ex_bits::packing_rabitqplus_code(
+        extra_raw.data(), extra_map.ex_code(), dim, extra_bits
     );
 }
 
