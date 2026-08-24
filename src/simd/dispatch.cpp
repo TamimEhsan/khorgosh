@@ -9,6 +9,7 @@
 #include "rabitqlib/simd/pack_excode_dispatch.hpp"
 #include "rabitqlib/simd/rotator_dispatch.hpp"
 #include "rabitqlib/simd/space_dispatch.hpp"
+#include "rabitqlib/simd/space_xy_dispatch.hpp"
 #include "rabitqlib/simd/warmup_dispatch.hpp"
 #include "rabitqlib/utils/cpu_features.hpp"
 
@@ -220,6 +221,15 @@ const MaskIpX0QFn kMaskIpX0QFn = [] {
         simd::missing_feature("mask ip x0 q");
     }
 }();
+
+// VNNI is a separate CPUID bit from the AVX512 core set, so it is resolved on
+// its own; the scalar path is a correct fallback, not a stub.
+const xy_base_ipfunc kXyBaseIpFn =
+    cpu::has_avx512_vnni()  ? simd::xy_base_ip_u8_avx512vnni
+    : cpu::has_avx2()       ? simd::xy_base_ip_u8_avx2
+                            : simd::xy_base_ip_u8_scalar;
+
+xy_base_ipfunc select_xy_base_ipfunc() { return kXyBaseIpFn; }
 
 ex_ipfunc select_excode_ipfunc(size_t ex_bits) {
     if (ex_bits <= 8) {

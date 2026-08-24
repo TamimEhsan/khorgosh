@@ -175,17 +175,39 @@ void RunXy(const Problem& p, size_t base_bits, size_t extra_bits) {
         p.g_add,
         p.g_error
     );
+    // Same filter stage, but with the query read as integers. Printed next to the
+    // float version so the cost of quantizing the query is visible per width.
+    float ip_base_q = 0;
+    float est_q = 0;
+    float low_q = 0;
+    xy_base_estdist_quantized(
+        base_data.data(),
+        select_xy_base_ipfunc(),
+        query,
+        p.dim,
+        base_bits,
+        ip_base_q,
+        est_q,
+        low_q,
+        p.g_add,
+        p.g_error
+    );
+
     char label[32];
     if (extra_bits == 0) {
         // No extra region, so the filter stage is the whole x+0 scheme.
         snprintf(label, sizeof(label), "xy %zu+0", base_bits);
         PrintRow(label, base_bits, est, low, p.actual_dist);
+        snprintf(label, sizeof(label), "xyq %zu+0", base_bits);
+        PrintRow(label, base_bits, est_q, low_q, p.actual_dist);
         return;
     }
     // Not the same code as a standalone x+0: this is the top x bits of an
     // (x+y)-bit code, so it is labelled as a stage, not as a scheme.
     snprintf(label, sizeof(label), "xy filt%zu", base_bits);
     PrintRow(label, base_bits, est, low, p.actual_dist);
+    snprintf(label, sizeof(label), "xyq filt%zu", base_bits);
+    PrintRow(label, base_bits, est_q, low_q, p.actual_dist);
 
     // Refine stage: reuses ip_base, reads only the extra region. Returns no
     // lower bound, exactly like the legacy split_distance_boosting.

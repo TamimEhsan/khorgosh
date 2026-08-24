@@ -15,6 +15,8 @@ enable_testing()
 # Include directories
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/common)
+# the register-level unpackers are implementation headers, not public API
+include_directories(${PROJECT_SOURCE_DIR}/src)
 
 # Compiler flags
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
@@ -29,6 +31,13 @@ add_executable(rabitq_tests
     ${COMMON_SRCS}
     ${UNIT_TESTS}
     ${INTEG_TESTS}
+)
+
+# Per-source, not per-target: only this file gets AVX flags, so the rest of the
+# suite stays portable and the binary still loads without AVX-512.
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/unit/rabitqlib/quantization/unpack_excode_simd_test.cpp
+    PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512bw -mavx512dq -mavx2 -mfma"
 )
 
 # Link google test and rabitqlib headers

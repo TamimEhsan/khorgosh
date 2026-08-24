@@ -54,6 +54,7 @@ Features detect_features() {
     detected.avx512dq = (l7_ebx >> 17) & 1;
     detected.avx512bw = (l7_ebx >> 30) & 1;
     detected.avx512vpopcntdq = (l7_ecx >> 14) & 1;
+    detected.avx512vnni = (l7_ecx >> 11) & 1;
 #endif
 
     return detected;
@@ -77,5 +78,7 @@ bool has_avx512_core() {
 }
 
 bool has_avx512_popcnt() { return has_avx512_core() && features().avx512vpopcntdq; }
+
+bool has_avx512_vnni() { return has_avx512_core() && features().avx512vnni; }
 
 }  // namespace rabitqlib::cpu

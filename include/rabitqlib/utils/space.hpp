@@ -257,6 +257,15 @@ using ex_ipfunc = float (*)(const float*, const uint8_t*, size_t);
 
 ex_ipfunc select_excode_ipfunc(size_t ex_bits);
 
+// Inner product between a scalar-quantized query (one uint8 per dimension) and a
+// packed base code, returning the real-valued ip. Unlike ex_ipfunc this consumes
+// the query as integers rather than floats, so the caller must pass the delta/vl
+// from the same quantization.
+using xy_base_ipfunc =
+    float (*)(const uint8_t*, const uint8_t*, size_t, size_t, float, float);
+
+xy_base_ipfunc select_xy_base_ipfunc();
+
 static inline uint32_t reverse_bits(uint32_t n) {
     n = ((n >> 1) & 0x55555555) | ((n << 1) & 0xaaaaaaaa);
     n = ((n >> 2) & 0x33333333) | ((n << 2) & 0xcccccccc);

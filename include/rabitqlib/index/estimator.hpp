@@ -280,6 +280,42 @@ inline void split_single_estdist_direct(
  * @param ip_base out: <rotated_query, base_code>, to be fed straight into
  *                xy_fulldist_boosting so the refine stage doesn't recompute it
  */
+// Same estimate as xy_base_estdist, but reading the query as integers rather
+// than floats: the kernel recovers sum(code * q_real) from sum(code * q_int) and
+// sum(code) using the delta/vl of the query's own quantization. The formula
+// downstream is identical, so this is a drop-in replacement -- but the result is
+// NOT: quantizing the query loses precision, so the estimate and its bound move
+// slightly. Trading that for speed is the entire point; measure recall before
+// adopting it, do not assume it.
+inline void xy_base_estdist_quantized(
+    const char* xy_base_data,
+    xy_base_ipfunc base_ip_func,
+    const XYQuery<float>& q_obj,
+    size_t padded_dim,
+    size_t base_bits,
+    float& ip_base,
+    float& est_dist,
+    float& low_dist,
+    float g_add,
+    float g_error
+) {
+    ConstBaseDataMap<float> cur_base(xy_base_data, padded_dim, base_bits);
+
+    ip_base = base_ip_func(
+        q_obj.quant_query(),
+        cur_base.base_code(),
+        padded_dim,
+        base_bits,
+        q_obj.delta(),
+        q_obj.vl()
+    );
+
+    est_dist =
+        cur_base.f_add() + g_add + (cur_base.f_rescale() * (ip_base + q_obj.kbxsumq()));
+
+    low_dist = est_dist - (cur_base.f_error() * g_error);
+}
+
 inline void xy_base_estdist(
     const char* xy_base_data,
     float (*base_ip_func)(const float*, const uint8_t*, size_t),
@@ -297,7 +333,7 @@ inline void xy_base_estdist(
     ip_base = base_ip_func(q_obj.rotated_query(), cur_base.base_code(), padded_dim);
 
     est_dist =
-        cur_base.f_add() + g_add + (cur_base.f_rescale() * (ip_base + q_obj.kbxsumq_base()));
+        cur_base.f_add() + g_add + (cur_base.f_rescale() * (ip_base + q_obj.kbxsumq()));
 
     low_dist = est_dist - (cur_base.f_error() * g_error);
 }
@@ -331,7 +367,7 @@ inline float xy_distance_boosting(
     float ip = (static_cast<float>(1 << extra_bits) * ip_base) +
                extra_ip_func(q_obj.rotated_query(), cur_extra.ex_code(), padded_dim);
 
-    return cur_extra.f_add_ex() + g_add + (cur_extra.f_rescale_ex() * (ip + q_obj.kbxsumq()));
+    return cur_extra.f_add_ex() + g_add + (cur_extra.f_rescale_ex() * (ip + q_obj.kbxysumq()));
 }
 
 /**
@@ -371,7 +407,7 @@ inline void xy_single_fulldist(
                extra_ip_func(q_obj.rotated_query(), cur_extra.ex_code(), padded_dim);
 
     est_dist =
-        cur_extra.f_add_ex() + g_add + (cur_extra.f_rescale_ex() * (ip + q_obj.kbxsumq()));
+        cur_extra.f_add_ex() + g_add + (cur_extra.f_rescale_ex() * (ip + q_obj.kbxysumq()));
 
     low_dist =
         est_dist - (cur_base.f_error() * g_error / static_cast<float>(1 << extra_bits));

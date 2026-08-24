@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <numeric>
 #include <utility>
+#include <vector>
 
 #include "rabitqlib/defines.hpp"
 #include "rabitqlib/index/lut.hpp"
@@ -197,10 +198,16 @@ template <typename T>
 class XYQuery {
    private:
     const T* rotated_query_;
+    // The query scalar-quantized to kNumBits, one byte per dimension. Unlike
+    // SplitSingleQuery this is NOT transposed into bit planes: the x+y kernels
+    // consume it as bytes, against codes unpacked to bytes, via VNNI.
+    std::vector<uint8_t> quant_query_;
+    T delta_ = 0;
+    T vl_ = 0;
     T G_add_ = 0;
     T G_error_ = 0;
-    T G_kbxSumq_base_ = 0;
     T G_kbxSumq_ = 0;
+    T G_kbxySumq_ = 0;
     MetricType metric_type_ = METRIC_L2;
 
    public:
@@ -208,14 +215,17 @@ class XYQuery {
     // layers read codes of different widths: the base-only estimate needs
     // cb = -(2^base_bits - 1)/2, the combined estimate needs
     // cb = -(2^(base_bits+extra_bits) - 1)/2. One query object serves both.
+    static constexpr size_t kNumBits = 4;
+
     explicit XYQuery(
         const T* rotated_query,
         size_t padded_dim,
         size_t base_bits,
         size_t extra_bits,
-        MetricType metric_type = METRIC_L2
+        MetricType metric_type = METRIC_L2,
+        quant::RabitqConfig config = quant::RabitqConfig()
     )
-        : rotated_query_(rotated_query) {
+        : rotated_query_(rotated_query), quant_query_(padded_dim, 0) {
         metric_type_ = (metric_type == METRIC_IP) ? METRIC_IP : METRIC_L2;
 
         float c_b_base = -static_cast<float>((1 << base_bits) - 1) / 2.F;
@@ -223,15 +233,30 @@ class XYQuery {
         T sumq =
             std::accumulate(rotated_query, rotated_query + padded_dim, static_cast<T>(0));
 
-        G_kbxSumq_base_ = sumq * c_b_base;
-        G_kbxSumq_ = sumq * c_b;
+        G_kbxSumq_ = sumq * c_b_base;
+        G_kbxySumq_ = sumq * c_b;
+
+        // q_real ~= delta * q_int + vl, which is what lets a kernel recover the
+        // real inner product from an integer one:
+        //     sum(code * q_real) = delta * sum(code * q_int) + vl * sum(code)
+        quant::quantize_scalar<float, uint8_t>(
+            rotated_query, padded_dim, kNumBits, quant_query_.data(), delta_, vl_, config
+        );
     }
+
+    [[nodiscard]] size_t num_bits() const { return kNumBits; }
+
+    [[nodiscard]] const uint8_t* quant_query() const { return quant_query_.data(); }
+
+    [[nodiscard]] T delta() const { return delta_; }
+
+    [[nodiscard]] T vl() const { return vl_; }
 
     [[nodiscard]] const T* rotated_query() const { return rotated_query_; }
 
-    [[nodiscard]] T kbxsumq_base() const { return G_kbxSumq_base_; }
-
     [[nodiscard]] T kbxsumq() const { return G_kbxSumq_; }
+
+    [[nodiscard]] T kbxysumq() const { return G_kbxySumq_; }
 
     [[nodiscard]] T g_add() const { return G_add_; }
 
