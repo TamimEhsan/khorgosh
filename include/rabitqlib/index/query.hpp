@@ -208,6 +208,8 @@ class XYQuery {
     T G_error_ = 0;
     T G_kbxSumq_ = 0;
     T G_kbxySumq_ = 0;
+    T G_kbxSumqHat_ = 0;
+    T G_kbxySumqHat_ = 0;
     MetricType metric_type_ = METRIC_L2;
 
    public:
@@ -242,6 +244,15 @@ class XYQuery {
         quant::quantize_scalar<float, uint8_t>(
             rotated_query, padded_dim, kNumBits, quant_query_.data(), delta_, vl_, config
         );
+
+        // sum(q_hat) = delta * sum(q_int) + vl * dim, computed once per query so the
+        // quantized estimators pay nothing for the correction at search time.
+        T sum_qint = std::accumulate(
+            quant_query_.begin(), quant_query_.end(), static_cast<T>(0)
+        );
+        T sumq_hat = (delta_ * sum_qint) + (vl_ * static_cast<T>(padded_dim));
+        G_kbxSumqHat_ = sumq_hat * c_b_base;
+        G_kbxySumqHat_ = sumq_hat * c_b;
     }
 
     [[nodiscard]] size_t num_bits() const { return kNumBits; }
@@ -255,6 +266,12 @@ class XYQuery {
     [[nodiscard]] const T* rotated_query() const { return rotated_query_; }
 
     [[nodiscard]] T kbxsumq() const { return G_kbxSumq_; }
+
+    // Pair these with an inner product taken against quant_query(), never with one
+    // taken against rotated_query().
+    [[nodiscard]] T kbxsumq_hat() const { return G_kbxSumqHat_; }
+
+    [[nodiscard]] T kbxysumq_hat() const { return G_kbxySumqHat_; }
 
     [[nodiscard]] T kbxysumq() const { return G_kbxySumq_; }
 

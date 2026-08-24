@@ -310,8 +310,10 @@ inline void xy_base_estdist_quantized(
         q_obj.vl()
     );
 
-    est_dist =
-        cur_base.f_add() + g_add + (cur_base.f_rescale() * (ip_base + q_obj.kbxsumq()));
+    // kbxsumq_hat(), not kbxsumq(): ip_base above was taken against the
+    // reconstructed query, so the offset-binary correction has to be too.
+    est_dist = cur_base.f_add() + g_add +
+               (cur_base.f_rescale() * (ip_base + q_obj.kbxsumq_hat()));
 
     low_dist = est_dist - (cur_base.f_error() * g_error);
 }
