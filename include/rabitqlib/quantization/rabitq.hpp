@@ -246,6 +246,43 @@ inline void quantize_split_batch(
     }
 }
 
+// Generalized x+y quantizer: base_bits (1-8) + extra_bits (0-8), capped at
+// xy_bits::kMaxCombinedBits (9) combined. At base_bits == 1, equivalent to
+// quantize_split_single()'s ex_bits-only path (see xy_quantization_test.cpp).
+// Purely additive; quantize_split_single/quantize_split_batch are unchanged.
+// x+y quantization of a single vector: one (base_bits+extra_bits)-bit code,
+// stored once, split across the two regions. xy_base_data holds the top
+// base_bits (the cheap filter layer, with its own factors), xy_extra_data
+// holds the bottom extra_bits (the refine layer, with the combined code's
+// factors). The base bits are never written twice -- the refine step
+// recovers the combined inner product from the filter step's base inner
+// product via ip(base)*2^extra_bits + ip(extra) (see xy_fulldist_boosting).
+//
+// xy_extra_data may be nullptr when extra_bits == 0.
+inline void quantize_xy_single(
+    const float* data,
+    const float* centroid,
+    size_t padded_dim,
+    size_t base_bits,
+    size_t extra_bits,
+    char* xy_base_data,
+    char* xy_extra_data,
+    MetricType metric_type = METRIC_L2,
+    RabitqConfig config = RabitqConfig()
+) {
+    rabitq_impl::xy_bits::xy_split_code_with_factor<float>(
+        data,
+        centroid,
+        padded_dim,
+        base_bits,
+        extra_bits,
+        xy_base_data,
+        xy_extra_data,
+        metric_type,
+        config.t_const
+    );
+}
+
 inline void quantize_split_single(
     const float* data,
     const float* centroid,

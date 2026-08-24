@@ -15,11 +15,13 @@ SET(CMAKE_CXX_FLAGS  "-Wall -Ofast -Wextra -lrt -fpic -fopenmp -ftree-vectorize 
 set(RABITQ_COMMON_SOURCES
     src/utils/cpu_features.cpp
     src/simd/dispatch.cpp
+    src/simd/space_xy_scalar.cpp
 )
 
 set(RABITQ_AVX2_SOURCES
     src/simd/pack_excode_avx2.cpp
     src/simd/space_excode_avx2.cpp
+    src/simd/space_xy_avx2.cpp
     src/simd/space_avx2.cpp
     src/simd/fastscan_avx2.cpp
     src/simd/warmup_avx2.cpp
@@ -38,6 +40,11 @@ set(RABITQ_AVX512_POPCNT_SOURCES
     src/simd/warmup_avx512.cpp
 )
 
+set(RABITQ_AVX512_VNNI_SOURCES
+    src/simd/space_xy_avx512.cpp
+)
+
+
 set(RABITQ_HNSW_AVX2_SOURCES
     src/index/hnsw_search_avx2.cpp
 )
@@ -55,6 +62,7 @@ add_library(rabitq_core STATIC
     ${RABITQ_AVX2_SOURCES}
     ${RABITQ_AVX512_SOURCES}
     ${RABITQ_AVX512_POPCNT_SOURCES}
+    ${RABITQ_AVX512_VNNI_SOURCES}
     ${RABITQ_HNSW_AVX2_SOURCES}
     ${RABITQ_HNSW_AVX512_CORE_SOURCES}
     ${RABITQ_HNSW_AVX512_POPCNT_SOURCES}
@@ -66,6 +74,7 @@ target_compile_options(rabitq_core PRIVATE -fopenmp)
 set_source_files_properties(${RABITQ_AVX2_SOURCES} PROPERTIES COMPILE_FLAGS "-mavx2 -mfma")
 set_source_files_properties(${RABITQ_AVX512_SOURCES} PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512bw -mavx512dq -mfma")
 set_source_files_properties(${RABITQ_AVX512_POPCNT_SOURCES} PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512bw -mavx512dq -mavx512vpopcntdq -mfma")
+set_source_files_properties(${RABITQ_AVX512_VNNI_SOURCES} PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512bw -mavx512dq -mavx512vnni -mfma")
 set_source_files_properties(${RABITQ_HNSW_AVX2_SOURCES} PROPERTIES COMPILE_FLAGS "-mavx2 -mfma")
 set_source_files_properties(${RABITQ_HNSW_AVX512_CORE_SOURCES} PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512bw -mavx512dq -mavx2 -mfma")
 set_source_files_properties(${RABITQ_HNSW_AVX512_POPCNT_SOURCES} PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512bw -mavx512dq -mavx512vpopcntdq -mfma")

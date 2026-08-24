@@ -9,6 +9,7 @@
 #include "rabitqlib/simd/pack_excode_dispatch.hpp"
 #include "rabitqlib/simd/rotator_dispatch.hpp"
 #include "rabitqlib/simd/space_dispatch.hpp"
+#include "rabitqlib/simd/space_xy_dispatch.hpp"
 #include "rabitqlib/simd/warmup_dispatch.hpp"
 #include "rabitqlib/utils/cpu_features.hpp"
 
@@ -20,10 +21,23 @@ namespace rabitqlib::simd {
     );
 }
 
+// Slot 0 of the excode IP table. With zero extra bits there is no ex region to
+// read (ExDataMap::data_bytes(dim, 0) == 0), so a real kernel here would read
+// dim/8 bytes past the end of a zero-length block. Returning 0 is also the
+// mathematically correct value: it makes the shared estimate formula
+//     f_add + g_add + f_rescale * ((1 << ex_bits) * ip_x0_qr + ip(ex) + kbxsumq)
+// collapse exactly onto the 1-bit estimate at ex_bits == 0, since the shift is
+// by zero and kbxsumq's c_b equals c_1. Callers need no ex_bits > 0 special case.
+namespace excode_ipimpl {
+static float ip_fxu0(const float* /*query*/, const uint8_t* /*code*/, size_t /*dim*/) {
+    return 0.0F;
+}
+}  // namespace excode_ipimpl
+
 ExcodeIpTable resolve_excode_ip_table() {
     if (cpu::has_avx512_core()) {
         return {
-            excode_ipimpl::ip16_fxu1_avx512,
+            excode_ipimpl::ip_fxu0,
             excode_ipimpl::ip16_fxu1_avx512,
             excode_ipimpl::ip64_fxu2_avx512,
             excode_ipimpl::ip64_fxu3_avx512,
@@ -35,7 +49,7 @@ ExcodeIpTable resolve_excode_ip_table() {
         };
     } else if (cpu::has_avx2()) {
         return {
-            excode_ipimpl::ip16_fxu1_avx2,
+            excode_ipimpl::ip_fxu0,
             excode_ipimpl::ip16_fxu1_avx2,
             excode_ipimpl::ip64_fxu2_avx2,
             excode_ipimpl::ip64_fxu3_avx2,
@@ -207,6 +221,15 @@ const MaskIpX0QFn kMaskIpX0QFn = [] {
         simd::missing_feature("mask ip x0 q");
     }
 }();
+
+// VNNI is a separate CPUID bit from the AVX512 core set, so it is resolved on
+// its own; the scalar path is a correct fallback, not a stub.
+const xy_base_ipfunc kXyBaseIpFn =
+    cpu::has_avx512_vnni()  ? simd::xy_base_ip_u8_avx512vnni
+    : cpu::has_avx2()       ? simd::xy_base_ip_u8_avx2
+                            : simd::xy_base_ip_u8_scalar;
+
+xy_base_ipfunc select_xy_base_ipfunc() { return kXyBaseIpFn; }
 
 ex_ipfunc select_excode_ipfunc(size_t ex_bits) {
     if (ex_bits <= 8) {
