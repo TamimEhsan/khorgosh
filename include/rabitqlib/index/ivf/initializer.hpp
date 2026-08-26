@@ -10,6 +10,7 @@
 
 #include "rabitqlib/defines.hpp"
 #include "rabitqlib/third/hnswlib/hnswlib.h"
+#include "rabitqlib/utils/gemv.hpp"
 #include "rabitqlib/utils/space.hpp"
 
 namespace rabitqlib::ivf {
@@ -81,8 +82,9 @@ class Initializer {
     virtual ~Initializer() = 0;
     [[nodiscard]] virtual const float* centroid(PID) const = 0;
     virtual void add_vectors(const float*, size_t) = 0;
-    virtual void
-    centroids_distances(const float*, size_t, std::vector<AnnCandidate<float>>&) const = 0;
+    virtual void centroids_distances(
+        const float*, size_t, std::vector<AnnCandidate<float>>&, float* = nullptr
+    ) const = 0;
     virtual void load(std::ifstream&, const char*) = 0;
     virtual void save(std::ofstream&, const char*) const = 0;
 };
@@ -96,6 +98,8 @@ class FlatInitializer : public Initializer {
     explicit FlatInitializer(size_t d, size_t k)
         : Initializer(d, k), centroids_(num_cluster_ * dim_) {}
 
+    std::vector<float> centroid_norms_sq_;
+
     ~FlatInitializer() override = default;
 
     [[nodiscard]] const float* centroid(PID id) const override {
@@ -104,15 +108,49 @@ class FlatInitializer : public Initializer {
 
     void add_vectors(const float* cent, size_t) override {
         std::memcpy(centroids_.data(), cent, sizeof(float) * num_cluster_ * dim_);
+        compute_centroid_norms();
     }
 
+    // When dots_out is non-null it must point at nprobe floats, which receive
+    // <query, centroid> for the selected centroids in candidate order. The IP search
+    // path needs those, and this initializer computes them anyway on the way to the
+    // distances, so handing them back costs a gather instead of a second pass.
     void centroids_distances(
-        const float* query, size_t nprobe, std::vector<AnnCandidate<float>>& candidates
+        const float* query,
+        size_t nprobe,
+        std::vector<AnnCandidate<float>>& candidates,
+        float* dots_out = nullptr
     ) const override {
         std::vector<AnnCandidate<float>> centroid_dist(this->num_cluster_);
+        // The IP path needs the raw dot products, so it always takes the gemv;
+        // L2-only callers go through l2_to_rows, which drops back to a per-row
+        // pass once the centroids no longer fit in cache.
+        std::vector<float> dots(this->num_cluster_);
+        if (dots_out != nullptr) {
+            gemv(centroids_.data(), query, num_cluster_, dim_, dots.data());
+            const float query_norm_sq =
+                ConstVectorMap<float>(query, static_cast<long>(dim_)).squaredNorm();
+            for (PID i = 0; i < num_cluster_; ++i) {
+                float d2 = centroid_norms_sq_[i] - (2.0F * dots[i]) + query_norm_sq;
+                centroid_dist[i].distance = std::sqrt(std::max(d2, 0.0F));
+            }
+        } else {
+            std::vector<float> d2(this->num_cluster_);
+            l2_to_rows(
+                centroids_.data(),
+                centroid_norms_sq_.data(),
+                query,
+                num_cluster_,
+                dim_,
+                d2.data(),
+                dots.data()
+            );
+            for (PID i = 0; i < num_cluster_; ++i) {
+                centroid_dist[i].distance = std::sqrt(d2[i]);
+            }
+        }
         for (PID i = 0; i < num_cluster_; ++i) {
             centroid_dist[i].id = i;
-            centroid_dist[i].distance = std::sqrt(euclidean_sqr(query, centroid(i), dim_));
         }
         std::partial_sort(
             centroid_dist.begin(),
@@ -123,6 +161,12 @@ class FlatInitializer : public Initializer {
         std::memcpy(
             candidates.data(), centroid_dist.data(), sizeof(AnnCandidate<float>) * nprobe
         );
+
+        if (dots_out != nullptr) {
+            for (size_t i = 0; i < nprobe; ++i) {
+                dots_out[i] = dots[candidates[i].id];
+            }
+        }
     }
 
     // for flat initer, we save & load into the ifstream
@@ -138,6 +182,12 @@ class FlatInitializer : public Initializer {
             reinterpret_cast<char*>(centroids_.data()),
             static_cast<long>(sizeof(float) * dim_ * num_cluster_)
         );
+        compute_centroid_norms();
+    }
+
+    void compute_centroid_norms() {
+        centroid_norms_sq_.resize(num_cluster_);
+        row_norms_sqr(centroids_.data(), num_cluster_, dim_, centroid_norms_sq_.data());
     }
 };
 
@@ -170,7 +220,10 @@ class HNSWInitializer : public Initializer {
     }
 
     void centroids_distances(
-        const float* query, size_t nprobe, std::vector<AnnCandidate<float>>& candidates
+        const float* query,
+        size_t nprobe,
+        std::vector<AnnCandidate<float>>& candidates,
+        float* dots_out = nullptr
     ) const override {
         alg_hnsw_->setEf(std::max(768UL, 2 * nprobe));
         std::priority_queue<std::pair<float, hnswlib::labeltype>> result =
@@ -180,6 +233,13 @@ class HNSWInitializer : public Initializer {
             candidates[i].distance = std::sqrt(result.top().first);
             candidates[i].id = result.top().second;
             result.pop();
+        }
+
+        // No dots fall out of a graph search, so this one pays for them.
+        if (dots_out != nullptr) {
+            for (size_t i = 0; i < nprobe; ++i) {
+                dots_out[i] = dot_product<float>(query, centroid(candidates[i].id), dim_);
+            }
         }
     }
 

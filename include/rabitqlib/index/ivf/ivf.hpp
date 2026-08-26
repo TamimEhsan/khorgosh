@@ -427,7 +427,18 @@ inline void IVF::search(
 
     // use initer to get closest nprobe centroids
     std::vector<AnnCandidate<float>> centroid_dist(nprobe);
-    this->initer_->centroids_distances(rotated_query.data(), nprobe, centroid_dist);
+    // IP needs <query, centroid> as well; the initializer hands those back rather than
+    // making us walk every selected centroid a second time below.
+    std::vector<float> centroid_dots;
+    if (metric_type_ == METRIC_IP) {
+        centroid_dots.resize(nprobe);
+    }
+    this->initer_->centroids_distances(
+        rotated_query.data(),
+        nprobe,
+        centroid_dist,
+        metric_type_ == METRIC_IP ? centroid_dots.data() : nullptr
+    );
 
     buffer::SearchBuffer knns(k);
 
@@ -443,10 +454,7 @@ inline void IVF::search(
         if (metric_type_ == METRIC_L2) {
             q_obj.set_g_add(dist);
         } else if (metric_type_ == METRIC_IP) {
-            auto g_add_ip = dot_product<float>(
-                rotated_query.data(), initer_->centroid(cid), padded_dim_
-            );
-            q_obj.set_g_add(dist, g_add_ip);
+            q_obj.set_g_add(dist, centroid_dots[i]);
         } else {
             // unsupported
             std::cerr << "Invalid quantize metric type, only support L2 and IP metric\n "

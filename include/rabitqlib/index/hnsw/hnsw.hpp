@@ -22,6 +22,7 @@
 #include "rabitqlib/quantization/rabitq.hpp"
 #include "rabitqlib/utils/buffer.hpp"
 #include "rabitqlib/utils/cpu_features.hpp"
+#include "rabitqlib/utils/gemv.hpp"
 #include "rabitqlib/utils/rotator.hpp"
 #include "rabitqlib/utils/space.hpp"
 #include "rabitqlib/utils/tools.hpp"
@@ -195,6 +196,20 @@ class HierarchicalNSW {
     Rotator<float>* rotator_ = nullptr;
 
     quant::RabitqConfig query_config_;
+
+    // ||c||^2 per centroid, so query-to-centroid distances come from the dot
+    // products alone. Declared here, after the members touched during search.
+    std::vector<float> centroid_norms_sq_;
+
+    void compute_centroid_norms() {
+        centroid_norms_sq_.resize(num_cluster_);
+        row_norms_sqr(
+            reinterpret_cast<const float*>(centroids_memory_),
+            num_cluster_,
+            padded_dim_,
+            centroid_norms_sq_.data()
+        );
+    }
 
     struct EstimateRecord {
         float ip_x0_qr;
@@ -559,6 +574,7 @@ inline void HierarchicalNSW::load(const char* filename) {
         centroids_memory_,
         static_cast<std::streamsize>(num_cluster_ * padded_dim_ * sizeof(float))
     );
+    compute_centroid_norms();
 
     data_level0_memory_ =
         reinterpret_cast<char*>(malloc(max_elements_ * size_data_per_element_));
@@ -640,6 +656,8 @@ inline void HierarchicalNSW::construct(
             reinterpret_cast<float*>(centroids_memory_) + (i * padded_dim_)
         );
     }
+
+    compute_centroid_norms();
 
     quant::RabitqConfig config;
     if (faster) {
@@ -1137,31 +1155,37 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct(
         rotated_query, padded_dim_, ex_bits_, query_config_, metric_type_
     );
 
-    // Preprocess - get the distance from query to all centroids
-    std::vector<float> q_to_centroids(num_cluster_);
+    // Preprocess - distance from the query to every centroid as one pass over the
+    // centroid block instead of num_cluster_ separate ones. IP gains most: it wants
+    // both <q,c> and ||q-c||, and the second follows from the first via the cached
+    // ||c||^2, so one pass replaces two.
+    std::vector<float> q_to_centroids(
+        metric_type_ == METRIC_IP ? 2 * num_cluster_ : num_cluster_
+    );
+    const auto* centroids = reinterpret_cast<const float*>(centroids_memory_);
 
     if (metric_type_ == METRIC_L2) {
+        l2_to_rows(
+            centroids,
+            centroid_norms_sq_.data(),
+            rotated_query,
+            num_cluster_,
+            padded_dim_,
+            q_to_centroids.data(),
+            q_to_centroids.data()
+        );
         for (size_t i = 0; i < num_cluster_; i++) {
-            q_to_centroids[i] = std::sqrt(raw_dist_func_(
-                rotated_query,
-                reinterpret_cast<float*>(centroids_memory_) + (i * padded_dim_),
-                padded_dim_
-            ));
+            q_to_centroids[i] = std::sqrt(q_to_centroids[i]);
         }
     } else if (metric_type_ == METRIC_IP) {
-        q_to_centroids.resize(2 * num_cluster_);
         // first half as g_add, second half as g_error
+        gemv(centroids, rotated_query, num_cluster_, padded_dim_, q_to_centroids.data());
+        const float query_norm_sq =
+            ConstVectorMap<float>(rotated_query, static_cast<long>(padded_dim_))
+                .squaredNorm();
         for (size_t i = 0; i < num_cluster_; i++) {
-            q_to_centroids[i] = dot_product(
-                rotated_query,
-                reinterpret_cast<float*>(centroids_memory_) + (i * padded_dim_),
-                padded_dim_
-            );
-            q_to_centroids[i + num_cluster_] = std::sqrt(euclidean_sqr(
-                rotated_query,
-                reinterpret_cast<float*>(centroids_memory_) + (i * padded_dim_),
-                padded_dim_
-            ));
+            float d2 = centroid_norms_sq_[i] - (2.0F * q_to_centroids[i]) + query_norm_sq;
+            q_to_centroids[i + num_cluster_] = std::sqrt(std::max(d2, 0.0F));
         }
     }
 
