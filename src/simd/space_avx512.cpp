@@ -147,4 +147,119 @@ float mask_ip_x0_q_avx512(const float* query, const uint64_t* data, size_t padde
     return _mm512_reduce_add_ps(sum);
 }
 
+// One query against many rows, kRows at a time. The point of the blocking is
+// that each row gets its own accumulator, so the FMA chains are independent and
+// their latency overlaps instead of serialising -- a row-at-a-time loop runs one
+// dependent FMA per step and leaves most of the pipeline idle. Reusing the
+// query load across the block is a secondary gain.
+//
+// The arithmetic is the plain (a-b)^2, so these are exact; there is no norm
+// expansion here and nothing to cancel.
+namespace {
+constexpr size_t kBatchRows = 8;
+
+inline __mmask16 tail_mask(size_t rest) { return static_cast<__mmask16>((1U << rest) - 1); }
+
+inline float l2_sqr_one_avx512(const float* row, const float* vec, size_t dim) {
+    __m512 acc = _mm512_setzero_ps();
+    size_t d = 0;
+    for (; d + 16 <= dim; d += 16) {
+        __m512 diff = _mm512_sub_ps(_mm512_loadu_ps(vec + d), _mm512_loadu_ps(row + d));
+        acc = _mm512_fmadd_ps(diff, diff, acc);
+    }
+    if (d < dim) {
+        __mmask16 m = tail_mask(dim - d);
+        __m512 diff = _mm512_sub_ps(
+            _mm512_maskz_loadu_ps(m, vec + d), _mm512_maskz_loadu_ps(m, row + d)
+        );
+        acc = _mm512_fmadd_ps(diff, diff, acc);
+    }
+    return _mm512_reduce_add_ps(acc);
+}
+}  // namespace
+
+void l2_sqr_batch_avx512(
+    const float* mat, const float* vec, size_t n, size_t dim, float* dists
+) {
+    size_t i = 0;
+    for (; i + kBatchRows <= n; i += kBatchRows) {
+        const float* rows = mat + (i * dim);
+        __m512 acc[kBatchRows];
+        for (size_t r = 0; r < kBatchRows; ++r) {
+            acc[r] = _mm512_setzero_ps();
+        }
+
+        size_t d = 0;
+        for (; d + 16 <= dim; d += 16) {
+            __m512 q = _mm512_loadu_ps(vec + d);
+            for (size_t r = 0; r < kBatchRows; ++r) {
+                __m512 diff = _mm512_sub_ps(q, _mm512_loadu_ps(rows + (r * dim) + d));
+                acc[r] = _mm512_fmadd_ps(diff, diff, acc[r]);
+            }
+        }
+        if (d < dim) {
+            __mmask16 m = tail_mask(dim - d);
+            __m512 q = _mm512_maskz_loadu_ps(m, vec + d);
+            for (size_t r = 0; r < kBatchRows; ++r) {
+                __m512 diff =
+                    _mm512_sub_ps(q, _mm512_maskz_loadu_ps(m, rows + (r * dim) + d));
+                acc[r] = _mm512_fmadd_ps(diff, diff, acc[r]);
+            }
+        }
+
+        for (size_t r = 0; r < kBatchRows; ++r) {
+            dists[i + r] = _mm512_reduce_add_ps(acc[r]);
+        }
+    }
+    for (; i < n; ++i) {
+        dists[i] = l2_sqr_one_avx512(mat + (i * dim), vec, dim);
+    }
+}
+
+void dot_l2_sqr_batch_avx512(
+    const float* mat, const float* vec, size_t n, size_t dim, float* dots, float* dists
+) {
+    size_t i = 0;
+    for (; i + kBatchRows <= n; i += kBatchRows) {
+        const float* rows = mat + (i * dim);
+        __m512 acc_ip[kBatchRows];
+        __m512 acc_l2[kBatchRows];
+        for (size_t r = 0; r < kBatchRows; ++r) {
+            acc_ip[r] = _mm512_setzero_ps();
+            acc_l2[r] = _mm512_setzero_ps();
+        }
+
+        size_t d = 0;
+        for (; d + 16 <= dim; d += 16) {
+            __m512 q = _mm512_loadu_ps(vec + d);
+            for (size_t r = 0; r < kBatchRows; ++r) {
+                __m512 mv = _mm512_loadu_ps(rows + (r * dim) + d);
+                acc_ip[r] = _mm512_fmadd_ps(q, mv, acc_ip[r]);
+                __m512 diff = _mm512_sub_ps(q, mv);
+                acc_l2[r] = _mm512_fmadd_ps(diff, diff, acc_l2[r]);
+            }
+        }
+        if (d < dim) {
+            __mmask16 m = tail_mask(dim - d);
+            __m512 q = _mm512_maskz_loadu_ps(m, vec + d);
+            for (size_t r = 0; r < kBatchRows; ++r) {
+                __m512 mv = _mm512_maskz_loadu_ps(m, rows + (r * dim) + d);
+                acc_ip[r] = _mm512_fmadd_ps(q, mv, acc_ip[r]);
+                __m512 diff = _mm512_sub_ps(q, mv);
+                acc_l2[r] = _mm512_fmadd_ps(diff, diff, acc_l2[r]);
+            }
+        }
+
+        for (size_t r = 0; r < kBatchRows; ++r) {
+            dots[i + r] = _mm512_reduce_add_ps(acc_ip[r]);
+            dists[i + r] = _mm512_reduce_add_ps(acc_l2[r]);
+        }
+    }
+    for (; i < n; ++i) {
+        const float* row = mat + (i * dim);
+        dots[i] = dot_product<float>(vec, row, dim);
+        dists[i] = l2_sqr_one_avx512(row, vec, dim);
+    }
+}
+
 }  // namespace rabitqlib::simd

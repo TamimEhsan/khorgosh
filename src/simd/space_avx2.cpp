@@ -187,4 +187,126 @@ float mask_ip_x0_q_avx2(const float* query, const uint64_t* data, size_t padded_
     return result;
 }
 
+// See the note on the AVX-512 pair in space_avx512.cpp: kRows independent
+// accumulators so the FMA chains overlap. Exact (a-b)^2, no norm expansion.
+namespace {
+constexpr size_t kBatchRows = 8;
+
+inline __m256i tail_mask(size_t rest) {
+    alignas(32) int32_t m[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (size_t i = 0; i < rest; ++i) {
+        m[i] = -1;
+    }
+    return _mm256_load_si256(reinterpret_cast<const __m256i*>(m));
+}
+
+inline float hsum256(__m256 v) {
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    lo = _mm_add_ps(lo, hi);
+    lo = _mm_add_ps(lo, _mm_movehl_ps(lo, lo));
+    lo = _mm_add_ss(lo, _mm_shuffle_ps(lo, lo, 0x55));
+    return _mm_cvtss_f32(lo);
+}
+
+inline float l2_sqr_one_avx2(const float* row, const float* vec, size_t dim) {
+    __m256 acc = _mm256_setzero_ps();
+    size_t d = 0;
+    for (; d + 8 <= dim; d += 8) {
+        __m256 diff = _mm256_sub_ps(_mm256_loadu_ps(vec + d), _mm256_loadu_ps(row + d));
+        acc = _mm256_fmadd_ps(diff, diff, acc);
+    }
+    if (d < dim) {
+        __m256i m = tail_mask(dim - d);
+        __m256 diff =
+            _mm256_sub_ps(_mm256_maskload_ps(vec + d, m), _mm256_maskload_ps(row + d, m));
+        acc = _mm256_fmadd_ps(diff, diff, acc);
+    }
+    return hsum256(acc);
+}
+}  // namespace
+
+void l2_sqr_batch_avx2(
+    const float* mat, const float* vec, size_t n, size_t dim, float* dists
+) {
+    size_t i = 0;
+    for (; i + kBatchRows <= n; i += kBatchRows) {
+        const float* rows = mat + (i * dim);
+        __m256 acc[kBatchRows];
+        for (size_t r = 0; r < kBatchRows; ++r) {
+            acc[r] = _mm256_setzero_ps();
+        }
+
+        size_t d = 0;
+        for (; d + 8 <= dim; d += 8) {
+            __m256 q = _mm256_loadu_ps(vec + d);
+            for (size_t r = 0; r < kBatchRows; ++r) {
+                __m256 diff = _mm256_sub_ps(q, _mm256_loadu_ps(rows + (r * dim) + d));
+                acc[r] = _mm256_fmadd_ps(diff, diff, acc[r]);
+            }
+        }
+        if (d < dim) {
+            __m256i m = tail_mask(dim - d);
+            __m256 q = _mm256_maskload_ps(vec + d, m);
+            for (size_t r = 0; r < kBatchRows; ++r) {
+                __m256 diff = _mm256_sub_ps(q, _mm256_maskload_ps(rows + (r * dim) + d, m));
+                acc[r] = _mm256_fmadd_ps(diff, diff, acc[r]);
+            }
+        }
+
+        for (size_t r = 0; r < kBatchRows; ++r) {
+            dists[i + r] = hsum256(acc[r]);
+        }
+    }
+    for (; i < n; ++i) {
+        dists[i] = l2_sqr_one_avx2(mat + (i * dim), vec, dim);
+    }
+}
+
+void dot_l2_sqr_batch_avx2(
+    const float* mat, const float* vec, size_t n, size_t dim, float* dots, float* dists
+) {
+    size_t i = 0;
+    for (; i + kBatchRows <= n; i += kBatchRows) {
+        const float* rows = mat + (i * dim);
+        __m256 acc_ip[kBatchRows];
+        __m256 acc_l2[kBatchRows];
+        for (size_t r = 0; r < kBatchRows; ++r) {
+            acc_ip[r] = _mm256_setzero_ps();
+            acc_l2[r] = _mm256_setzero_ps();
+        }
+
+        size_t d = 0;
+        for (; d + 8 <= dim; d += 8) {
+            __m256 q = _mm256_loadu_ps(vec + d);
+            for (size_t r = 0; r < kBatchRows; ++r) {
+                __m256 mv = _mm256_loadu_ps(rows + (r * dim) + d);
+                acc_ip[r] = _mm256_fmadd_ps(q, mv, acc_ip[r]);
+                __m256 diff = _mm256_sub_ps(q, mv);
+                acc_l2[r] = _mm256_fmadd_ps(diff, diff, acc_l2[r]);
+            }
+        }
+        if (d < dim) {
+            __m256i m = tail_mask(dim - d);
+            __m256 q = _mm256_maskload_ps(vec + d, m);
+            for (size_t r = 0; r < kBatchRows; ++r) {
+                __m256 mv = _mm256_maskload_ps(rows + (r * dim) + d, m);
+                acc_ip[r] = _mm256_fmadd_ps(q, mv, acc_ip[r]);
+                __m256 diff = _mm256_sub_ps(q, mv);
+                acc_l2[r] = _mm256_fmadd_ps(diff, diff, acc_l2[r]);
+            }
+        }
+
+        for (size_t r = 0; r < kBatchRows; ++r) {
+            dots[i + r] = hsum256(acc_ip[r]);
+            dists[i + r] = hsum256(acc_l2[r]);
+        }
+    }
+    for (; i < n; ++i) {
+        const float* row = mat + (i * dim);
+        dots[i] = dot_product<float>(vec, row, dim);
+        dists[i] = l2_sqr_one_avx2(row, vec, dim);
+    }
+}
+
 }  // namespace rabitqlib::simd

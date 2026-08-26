@@ -10,7 +10,6 @@
 
 #include "rabitqlib/defines.hpp"
 #include "rabitqlib/third/hnswlib/hnswlib.h"
-#include "rabitqlib/utils/gemv.hpp"
 #include "rabitqlib/utils/space.hpp"
 
 namespace rabitqlib::ivf {
@@ -98,8 +97,6 @@ class FlatInitializer : public Initializer {
     explicit FlatInitializer(size_t d, size_t k)
         : Initializer(d, k), centroids_(num_cluster_ * dim_) {}
 
-    std::vector<float> centroid_norms_sq_;
-
     ~FlatInitializer() override = default;
 
     [[nodiscard]] const float* centroid(PID id) const override {
@@ -108,7 +105,6 @@ class FlatInitializer : public Initializer {
 
     void add_vectors(const float* cent, size_t) override {
         std::memcpy(centroids_.data(), cent, sizeof(float) * num_cluster_ * dim_);
-        compute_centroid_norms();
     }
 
     // When dots_out is non-null it must point at nprobe floats, which receive
@@ -122,35 +118,23 @@ class FlatInitializer : public Initializer {
         float* dots_out = nullptr
     ) const override {
         std::vector<AnnCandidate<float>> centroid_dist(this->num_cluster_);
-        // The IP path needs the raw dot products, so it always takes the gemv;
-        // L2-only callers go through l2_to_rows, which drops back to a per-row
-        // pass once the centroids no longer fit in cache.
-        std::vector<float> dots(this->num_cluster_);
+        // A caller that wants the dot products gets them from the same pass; one
+        // that does not skips computing them at all.
+        std::vector<float> dist_sqr(this->num_cluster_);
+        std::vector<float> dots;
         if (dots_out != nullptr) {
-            gemv(centroids_.data(), query, num_cluster_, dim_, dots.data());
-            const float query_norm_sq =
-                ConstVectorMap<float>(query, static_cast<long>(dim_)).squaredNorm();
-            for (PID i = 0; i < num_cluster_; ++i) {
-                float d2 = centroid_norms_sq_[i] - (2.0F * dots[i]) + query_norm_sq;
-                centroid_dist[i].distance = std::sqrt(std::max(d2, 0.0F));
-            }
-        } else {
-            std::vector<float> d2(this->num_cluster_);
-            l2_to_rows(
-                centroids_.data(),
-                centroid_norms_sq_.data(),
-                query,
-                num_cluster_,
-                dim_,
-                d2.data(),
-                dots.data()
+            dots.resize(this->num_cluster_);
+            simd::dot_l2_sqr_batch(
+                centroids_.data(), query, num_cluster_, dim_, dots.data(), dist_sqr.data()
             );
-            for (PID i = 0; i < num_cluster_; ++i) {
-                centroid_dist[i].distance = std::sqrt(d2[i]);
-            }
+        } else {
+            simd::l2_sqr_batch(
+                centroids_.data(), query, num_cluster_, dim_, dist_sqr.data()
+            );
         }
         for (PID i = 0; i < num_cluster_; ++i) {
             centroid_dist[i].id = i;
+            centroid_dist[i].distance = std::sqrt(dist_sqr[i]);
         }
         std::partial_sort(
             centroid_dist.begin(),
@@ -182,12 +166,6 @@ class FlatInitializer : public Initializer {
             reinterpret_cast<char*>(centroids_.data()),
             static_cast<long>(sizeof(float) * dim_ * num_cluster_)
         );
-        compute_centroid_norms();
-    }
-
-    void compute_centroid_norms() {
-        centroid_norms_sq_.resize(num_cluster_);
-        row_norms_sqr(centroids_.data(), num_cluster_, dim_, centroid_norms_sq_.data());
     }
 };
 

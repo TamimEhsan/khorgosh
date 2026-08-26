@@ -119,6 +119,39 @@ const PackExcodeFn kPacking6BitExcodeFn =
 const PackExcodeFn kPacking7BitExcodeFn =
     resolve_pack_excode_fn(packing_7bit_excode_avx512, packing_7bit_excode_avx2);
 
+using L2SqrBatchFn = void (*)(const float*, const float*, size_t, size_t, float*);
+const L2SqrBatchFn kL2SqrBatchFn = [] {
+    if (cpu::has_avx512_core()) {
+        return l2_sqr_batch_avx512;
+    } else if (cpu::has_avx2()) {
+        return l2_sqr_batch_avx2;
+    } else {
+        missing_feature("batched l2");
+    }
+}();
+
+using DotL2SqrBatchFn =
+    void (*)(const float*, const float*, size_t, size_t, float*, float*);
+const DotL2SqrBatchFn kDotL2SqrBatchFn = [] {
+    if (cpu::has_avx512_core()) {
+        return dot_l2_sqr_batch_avx512;
+    } else if (cpu::has_avx2()) {
+        return dot_l2_sqr_batch_avx2;
+    } else {
+        missing_feature("batched dot+l2");
+    }
+}();
+
+void l2_sqr_batch(const float* mat, const float* vec, size_t n, size_t dim, float* dists) {
+    kL2SqrBatchFn(mat, vec, n, dim, dists);
+}
+
+void dot_l2_sqr_batch(
+    const float* mat, const float* vec, size_t n, size_t dim, float* dots, float* dists
+) {
+    kDotL2SqrBatchFn(mat, vec, n, dim, dots, dists);
+}
+
 void flip_sign(const uint8_t* flip, float* data, size_t dim) {
     kFlipSignFn(flip, data, dim);
 }

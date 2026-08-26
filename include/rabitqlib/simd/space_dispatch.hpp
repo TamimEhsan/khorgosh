@@ -86,6 +86,27 @@ void scalar_quantize_uint16_avx512(
     uint16_t* result, const float* vec0, size_t dim, float lo, float delta
 );
 
+void l2_sqr_batch_avx2(
+    const float* mat, const float* vec, size_t n, size_t dim, float* dists
+);
+void dot_l2_sqr_batch_avx2(
+    const float* mat, const float* vec, size_t n, size_t dim, float* dots, float* dists
+);
+void l2_sqr_batch_avx512(
+    const float* mat, const float* vec, size_t n, size_t dim, float* dists
+);
+void dot_l2_sqr_batch_avx512(
+    const float* mat, const float* vec, size_t n, size_t dim, float* dots, float* dists
+);
+
+// dists[i] = ||mat_i - vec||^2 for n row-major rows of length dim.
+void l2_sqr_batch(const float* mat, const float* vec, size_t n, size_t dim, float* dists);
+
+// Same, plus dots[i] = <mat_i, vec>, from a single pass over the matrix.
+void dot_l2_sqr_batch(
+    const float* mat, const float* vec, size_t n, size_t dim, float* dots, float* dists
+);
+
 void scalar_quantize_uint8(
     uint8_t* result, const float* vec0, size_t dim, float lo, float delta
 );
