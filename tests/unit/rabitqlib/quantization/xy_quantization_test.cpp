@@ -27,7 +27,6 @@ std::vector<float> RandomVec(size_t dim, std::mt19937& gen) {
     return v;
 }
 
-
 // The function writes packed codes into the data blocks and no unpacker exists.
 // Recover the raw per-dimension codes through the library's own reader instead
 // of reimplementing seven SIMD bit layouts: a one-hot query makes the ex-code
@@ -70,9 +69,7 @@ XySplitResult SplitCode(
     res.base_code.resize(dim);
     res.extra_code.resize(dim);
 
-    std::vector<char> base_block(
-        BaseDataMap<float>::data_bytes(dim, base_bits), 0
-    );
+    std::vector<char> base_block(BaseDataMap<float>::data_bytes(dim, base_bits), 0);
     std::vector<char> extra_block(
         extra_bits > 0 ? ExDataMap<float>::data_bytes(dim, extra_bits) : 1, 0
     );

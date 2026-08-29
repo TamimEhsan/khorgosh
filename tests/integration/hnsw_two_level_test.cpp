@@ -115,7 +115,7 @@ float RecallAtK(
 // path hits a pre-existing, unrelated HNSW construction bug (misaligned
 // uint64_t store in pack_binary(), see xy_quantization_plan.md) that's out
 // of scope for this change and left alone per direction.
-TEST(HnswXyIntegration, BaseBitsOneNewCtorConstructsAndSearches) {
+TEST(HnswTwoLevelIntegration, BaseBitsOneNewCtorConstructsAndSearches) {
     auto data = MakeData(1);
 
     HierarchicalNSW index(kNumPoints, kDim, XyQuantBits{1, 4}, 16, 100);
@@ -132,10 +132,56 @@ TEST(HnswXyIntegration, BaseBitsOneNewCtorConstructsAndSearches) {
     EXPECT_GT(recall, 0.5F);
 }
 
-TEST(HnswXyIntegration, BaseBitsGreaterThanOneGivesReasonableRecall) {
+TEST(HnswTwoLevelIntegration, TwoLevelGivesReasonableRecall) {
     auto data = MakeData(2);
 
-    HierarchicalNSW index(kNumPoints, kDim, XyQuantBits{3, 4}, 16, 100);
+    HierarchicalNSW index(kNumPoints, kDim, XyQuantBits{2, 4}, 16, 100);
+    EXPECT_EQ(index.base_bits(), 2U);
+    EXPECT_EQ(index.nbits(), 6U);
+    index.construct(
+        1, data.centroid.data(), kNumPoints, data.base.data(), data.cluster_ids.data(), 1
+    );
+    auto results = index.search(data.queries.data(), kNumQueries, 10, 80, 1);
+
+    auto gt = BruteForceTopK(data, 10);
+    float recall = RecallAtK(results, gt);
+    EXPECT_GT(recall, 0.5F);
+}
+
+// base_bits outside {1, 2} is rejected at construction, not silently
+// mishandled. The generic BaseDataMap path it used to take is still in the
+// library and still tested at the quantization level -- this gate is what
+// makes HNSW two-level-only.
+TEST(HnswTwoLevelIntegration, RejectsUnsupportedBaseBits) {
+    for (size_t base_bits : {0U, 3U, 4U, 8U}) {
+        EXPECT_THROW(
+            HierarchicalNSW(kSmallNumPoints, kDim, XyQuantBits{base_bits, 2}, 16, 100),
+            std::invalid_argument
+        ) << "base_bits="
+          << base_bits;
+    }
+    // extra_bits > 8 has no pack_excode / excode-ip support.
+    EXPECT_THROW(
+        HierarchicalNSW(kSmallNumPoints, kDim, XyQuantBits{2, 9}, 16, 100),
+        std::invalid_argument
+    );
+    // 1 + 9 would need a 9-bit ex code, which pack_excode does not have.
+    EXPECT_THROW(
+        HierarchicalNSW(kSmallNumPoints, kDim, XyQuantBits{1, 9}, 16, 100),
+        std::invalid_argument
+    );
+}
+
+// 2+8 is the widest code the library supports (kMaxCombinedBits == 10) and
+// is reachable only through the two-level path: the 1+y layout would need a
+// 9-bit ex code, which pack_excode does not have. It exercises a 9-bit
+// magnitude, which is what kTightStart's tenth entry is for.
+TEST(HnswTwoLevelIntegration, TenTotalBitsBuildsAndSearches) {
+    auto data = MakeData(8);
+
+    HierarchicalNSW index(kNumPoints, kDim, XyQuantBits{2, 8}, 16, 100);
+    EXPECT_EQ(index.nbits(), 10U);
+
     index.construct(
         1, data.centroid.data(), kNumPoints, data.base.data(), data.cluster_ids.data(), 1
     );
@@ -151,16 +197,21 @@ TEST(HnswXyIntegration, BaseBitsGreaterThanOneGivesReasonableRecall) {
 // band. The old two-layer implementation could not satisfy this -- it
 // quantized twice with independently optimized scale factors, so the base
 // half of the refine layer disagreed with the filter layer's code.
-TEST(HnswXyIntegration, RecallIsStableAcrossSplitPointsAtEqualTotalBits) {
+TEST(HnswTwoLevelIntegration, RecallIsStableAcrossSplitPointsAtEqualTotalBits) {
     auto data = MakeData(5);
     auto gt = BruteForceTopK(data, 10);
 
-    std::vector<std::pair<size_t, size_t>> splits = {{1, 4}, {2, 3}, {3, 2}, {5, 0}};
+    std::vector<std::pair<size_t, size_t>> splits = {{1, 4}, {2, 3}};
     std::vector<float> recalls;
     for (auto [x, y] : splits) {
         HierarchicalNSW index(kNumPoints, kDim, XyQuantBits{x, y}, 16, 100);
         index.construct(
-            1, data.centroid.data(), kNumPoints, data.base.data(), data.cluster_ids.data(), 1
+            1,
+            data.centroid.data(),
+            kNumPoints,
+            data.base.data(),
+            data.cluster_ids.data(),
+            1
         );
         auto results = index.search(data.queries.data(), kNumQueries, 10, 80, 1);
         recalls.push_back(RecallAtK(results, gt));
@@ -169,19 +220,23 @@ TEST(HnswXyIntegration, RecallIsStableAcrossSplitPointsAtEqualTotalBits) {
     float lo = *std::min_element(recalls.begin(), recalls.end());
     float hi = *std::max_element(recalls.begin(), recalls.end());
     EXPECT_GT(lo, 0.5F);
-    EXPECT_LT(hi - lo, 0.15F) << "recalls: " << recalls[0] << " " << recalls[1] << " "
-                              << recalls[2] << " " << recalls[3];
+    EXPECT_LT(hi - lo, 0.15F) << "recalls: " << recalls[0] << " " << recalls[1];
 }
 
-TEST(HnswXyIntegration, SaveLoadRoundTripXyMode) {
+TEST(HnswTwoLevelIntegration, SaveLoadRoundTripTwoLevelMode) {
     auto data = MakeData(3);
-    const char* path = "hnsw_xy_test_index.bin";
+    const char* path = "hnsw_two_level_test_index.bin";
 
     std::vector<std::vector<std::pair<float, PID>>> results_before;
     {
-        HierarchicalNSW index(kNumPoints, kDim, XyQuantBits{3, 4}, 16, 100);
+        HierarchicalNSW index(kNumPoints, kDim, XyQuantBits{2, 4}, 16, 100);
         index.construct(
-            1, data.centroid.data(), kNumPoints, data.base.data(), data.cluster_ids.data(), 1
+            1,
+            data.centroid.data(),
+            kNumPoints,
+            data.base.data(),
+            data.cluster_ids.data(),
+            1
         );
         results_before = index.search(data.queries.data(), kNumQueries, 10, 80, 1);
         index.save(path);
@@ -189,8 +244,8 @@ TEST(HnswXyIntegration, SaveLoadRoundTripXyMode) {
 
     HierarchicalNSW loaded;
     loaded.load(path);
-    EXPECT_EQ(loaded.base_bits(), 3U);
-    EXPECT_EQ(loaded.nbits(), 7U);
+    EXPECT_EQ(loaded.base_bits(), 2U);
+    EXPECT_EQ(loaded.nbits(), 6U);
     auto results_after = loaded.search(data.queries.data(), kNumQueries, 10, 80, 1);
 
     ASSERT_EQ(results_before.size(), results_after.size());
@@ -205,9 +260,9 @@ TEST(HnswXyIntegration, SaveLoadRoundTripXyMode) {
     std::remove(path);
 }
 
-TEST(HnswXyIntegration, LoadRejectsMismatchedFormatVersion) {
+TEST(HnswTwoLevelIntegration, LoadRejectsMismatchedFormatVersion) {
     auto data = MakeData(3, kSmallNumPoints);
-    const char* path = "hnsw_xy_test_bad_version.bin";
+    const char* path = "hnsw_two_level_test_bad_version.bin";
 
     {
         HierarchicalNSW index(kSmallNumPoints, kDim, XyQuantBits{1, 2}, 16, 100);

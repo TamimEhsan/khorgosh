@@ -247,7 +247,7 @@ inline void quantize_split_batch(
 }
 
 // Generalized x+y quantizer: base_bits (1-8) + extra_bits (0-8), capped at
-// xy_bits::kMaxCombinedBits (9) combined. At base_bits == 1, equivalent to
+// xy_bits::kMaxCombinedBits (10) combined. At base_bits == 1, equivalent to
 // quantize_split_single()'s ex_bits-only path (see xy_quantization_test.cpp).
 // Purely additive; quantize_split_single/quantize_split_batch are unchanged.
 // x+y quantization of a single vector: one (base_bits+extra_bits)-bit code,
@@ -278,6 +278,37 @@ inline void quantize_xy_single(
         extra_bits,
         xy_base_data,
         xy_extra_data,
+        metric_type,
+        config.t_const
+    );
+}
+
+// Two-level (2+x) quantizer: the base_bits == 2 case of quantize_xy_single,
+// with the base code stored as two 1-bit planes instead of one packed 2-bit
+// excode. Same code, same factors -- see
+// rabitq_impl::xy_bits::two_level_split_code_with_factor for why the
+// plane split is free and what it buys the search path.
+//
+// ! padded_dim % 64 == 0
+//
+// extra_data may be nullptr when extra_bits == 0.
+inline void quantize_two_level_single(
+    const float* data,
+    const float* centroid,
+    size_t padded_dim,
+    size_t extra_bits,
+    char* base_data,
+    char* extra_data,
+    MetricType metric_type = METRIC_L2,
+    RabitqConfig config = RabitqConfig()
+) {
+    rabitq_impl::xy_bits::two_level_split_code_with_factor<float>(
+        data,
+        centroid,
+        padded_dim,
+        extra_bits,
+        base_data,
+        extra_data,
         metric_type,
         config.t_const
     );

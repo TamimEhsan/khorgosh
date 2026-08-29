@@ -16,13 +16,17 @@ namespace rabitqlib::python_bindings {
 
 class HnswIndex {
    public:
-    // base_bits/extra_bits are the new x+y quantization knobs (base_bits
-    // 1-8, extra_bits 0-8, base_bits+extra_bits <= 9). Leave both at their
-    // default of None to keep today's behavior unchanged: nbits is used as
-    // total_bits via the old (implicit base_bits=1) constructor, exactly as
-    // before. Passing base_bits switches to the new XyQuantBits{base_bits,
-    // extra_bits} constructor instead -- nbits is then ignored (the actual
-    // total bit count becomes base_bits + extra_bits).
+    // base_bits/extra_bits select the quantization split (base_bits 1 or 2,
+    // extra_bits 0-8, base_bits+extra_bits <= 10). Leave both at their default
+    // of None to keep today's behavior unchanged: nbits is used as total_bits
+    // via the old (implicit base_bits=1) constructor, exactly as before.
+    // Passing base_bits switches to XyQuantBits{base_bits, extra_bits}
+    // instead -- nbits is then ignored (the actual total bit count becomes
+    // base_bits + extra_bits).
+    //
+    // base_bits=1 is the legacy 1+y layout and search path; base_bits=2 is
+    // the two-level layout with progressive distance computation. Any other
+    // value raises ValueError from the C++ constructor.
     HnswIndex(
         size_t dim,
         size_t max_elements,
@@ -239,36 +243,44 @@ void register_hnsw(py::module_& m) {
     using namespace rabitqlib::python_bindings;
 
     py::class_<HnswIndex>(m, "HnswIndex")
-        .def(py::init<
-                 size_t,
-                 size_t,
-                 size_t,
-                 size_t,
-                 size_t,
-                 const std::string&,
-                 size_t,
-                 py::object,
-                 py::object>(),
-             py::arg("dim"),
-             py::arg("max_elements"),
-             py::arg("M") = 16,
-             py::arg("ef_construction") = 200,
-             py::arg("nbits") = 8,
-             py::arg("metric") = "l2",
-             py::arg("random_seed") = 100,
-             py::arg("base_bits") = py::none(),
-             py::arg("extra_bits") = py::none())
-        .def("build", &HnswIndex::build,
-             py::arg("data"),
-             py::arg("centroids"),
-             py::arg("cluster_ids"),
-             py::arg("num_threads") = 1,
-             py::arg("fast_quantization") = false)
-        .def("search", &HnswIndex::search,
-             py::arg("queries"),
-             py::arg("k"),
-             py::arg("ef") = 0,
-             py::arg("num_threads") = 1)
+        .def(
+            py::init<
+                size_t,
+                size_t,
+                size_t,
+                size_t,
+                size_t,
+                const std::string&,
+                size_t,
+                py::object,
+                py::object>(),
+            py::arg("dim"),
+            py::arg("max_elements"),
+            py::arg("M") = 16,
+            py::arg("ef_construction") = 200,
+            py::arg("nbits") = 8,
+            py::arg("metric") = "l2",
+            py::arg("random_seed") = 100,
+            py::arg("base_bits") = py::none(),
+            py::arg("extra_bits") = py::none()
+        )
+        .def(
+            "build",
+            &HnswIndex::build,
+            py::arg("data"),
+            py::arg("centroids"),
+            py::arg("cluster_ids"),
+            py::arg("num_threads") = 1,
+            py::arg("fast_quantization") = false
+        )
+        .def(
+            "search",
+            &HnswIndex::search,
+            py::arg("queries"),
+            py::arg("k"),
+            py::arg("ef") = 0,
+            py::arg("num_threads") = 1
+        )
         .def("save", &HnswIndex::save, py::arg("path"))
         .def_static("load", &HnswIndex::load, py::arg("path"))
         .def_property_readonly("dim", &HnswIndex::dim)

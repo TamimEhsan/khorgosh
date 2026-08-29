@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "rabitqlib/defines.hpp"
@@ -274,7 +276,17 @@ namespace ex_bits {
  * @return ipnorm_inv  Returned factor
  */
 
-constexpr std::array<float, 9> kTightStart = {
+// Search floor for best_rescale_factor(), as a fraction of t_end, indexed by
+// magnitude width. The sweep only ever moves t upward from
+// t_end * kTightStart[bits], so an entry above the true optimum silently
+// costs quantization quality; a low entry only costs sweep time.
+//
+// The 9-bit entry was added when kMaxCombinedBits went 9 -> 10 (a 10-bit
+// combined code carries 9 magnitude bits). Measured over 300 normalized
+// gaussian vectors spanning dim 64..1024, the optimum never fell below
+// 0.895 of t_end at 9 bits, so 0.84 clears it with margin and continues the
+// table's progression.
+constexpr std::array<float, 10> kTightStart = {
     0,
     0.15,
     0.20,
@@ -284,6 +296,7 @@ constexpr std::array<float, 9> kTightStart = {
     0.75,
     0.77,
     0.81,
+    0.84,
 };
 
 template <typename T>
@@ -683,11 +696,20 @@ static inline void rabitq_full_impl(
 // base_bits == 1 is bit-for-bit identical to today's one_bit_code_with_factor
 // + ex_bits_code_with_factor(ex_bits=extra_bits) (see xy_quantization_test.cpp).
 //
-// NOTE: best_rescale_factor()'s kTightStart table only covers magnitude
-// widths 0-8, so base_bits + extra_bits is capped at 9 for now.
+// NOTE: a combined code is one sign bit plus (total - 1) magnitude bits, so
+// the cap is bounded by how wide a magnitude best_rescale_factor() can
+// handle -- i.e. by kTightStart's length.
 namespace xy_bits {
 
-constexpr size_t kMaxCombinedBits = 9;
+constexpr size_t kMaxCombinedBits = 10;
+
+// A total_bits-wide code has total_bits - 1 magnitude bits, and
+// best_rescale_factor() indexes kTightStart by that width. Raising the cap
+// without extending the table would read past its end.
+static_assert(
+    ex_bits::kTightStart.size() >= kMaxCombinedBits,
+    "kTightStart must cover magnitude widths up to kMaxCombinedBits - 1"
+);
 
 /**
  * @brief Derive the 3 estimation factors for an arbitrary integer code.
@@ -753,6 +775,71 @@ inline void code_factors(
 }
 
 /**
+ * @brief Shared front half of the x+y quantizers: build the residual, the
+ *        combined (base_bits + extra_bits)-bit code, and its split into the
+ *        top base_bits and the bottom extra_bits.
+ *
+ * Both base-layer storage formats need exactly this and differ only in how
+ * they write the base code down -- pack_excode for the generic widths,
+ * two pack_binary planes for 2+x -- so the algebra lives here once.
+ *
+ * The combined code is one sign bit above mag_bits of magnitude, and
+ * mag_code < 2^mag_bits, so no carry crosses into the sign. That is what
+ * makes the top bit of base_code_int the plain sign bit at every split
+ * point, and it is the property the 2+x layout depends on.
+ *
+ * @param extra_raw out: bottom extra_bits of each code; left empty when
+ *                  extra_bits == 0
+ */
+template <typename T>
+inline void split_combined_code(
+    const T* data,
+    const T* centroid,
+    size_t dim,
+    size_t extra_bits,
+    size_t total_bits,
+    double t_const,
+    RowMajorArray<T>& residual_arr,
+    std::vector<int>& total_code,
+    std::vector<int>& base_code_int,
+    std::vector<uint8_t>& extra_raw
+) {
+    ConstRowMajorArrayMap<T> data_arr(data, 1, static_cast<long>(dim));
+    ConstRowMajorArrayMap<T> cent_arr(centroid, 1, static_cast<long>(dim));
+    residual_arr = data_arr - cent_arr;
+    const T* residual = residual_arr.data();
+
+    // One sign bit plus mag_bits of magnitude makes up the combined code.
+    // uint16_t, not uint8_t: at the 10-bit cap the magnitude is 9 bits wide,
+    // whose codes reach 511. The base/extra codes split out of total_code
+    // below are each at most 8 bits and stay uint8_t.
+    const size_t mag_bits = total_bits - 1;
+    std::vector<uint16_t> mag_code(dim, 0);
+
+    if (mag_bits > 0) {
+        ex_bits::ex_bits_code<T, uint16_t>(
+            residual, dim, mag_bits, mag_code.data(), t_const
+        );
+    }
+
+    total_code.assign(dim, 0);
+    for (size_t i = 0; i < dim; ++i) {
+        total_code[i] = static_cast<int>(mag_code[i]) +
+                        (static_cast<int>(residual[i] >= 0) << mag_bits);
+    }
+
+    const auto extra_mask = (extra_bits > 0) ? static_cast<int>((1U << extra_bits) - 1) : 0;
+    base_code_int.assign(dim, 0);
+    extra_raw.assign(extra_bits > 0 ? dim : 0, 0);
+    for (size_t i = 0; i < dim; ++i) {
+        base_code_int[i] = total_code[i] >> extra_bits;
+        if (extra_bits > 0) {
+            extra_raw[i] = static_cast<uint8_t>(total_code[i] & extra_mask);
+        }
+    }
+}
+
+/**
  * @brief Quantize one vector into a (base_bits + extra_bits)-bit code and write
  *        both layers, with their factors, straight into their data blocks.
  *
@@ -795,39 +882,27 @@ inline void xy_split_code_with_factor(
         exit(1);
     }
 
-    ConstRowMajorArrayMap<T> data_arr(data, 1, static_cast<long>(dim));
-    ConstRowMajorArrayMap<T> cent_arr(centroid, 1, static_cast<long>(dim));
-    RowMajorArray<T> residual_arr = data_arr - cent_arr;
+    RowMajorArray<T> residual_arr;
+    std::vector<int> total_code;
+    std::vector<int> base_code_int;
+    std::vector<uint8_t> extra_raw;
+    split_combined_code<T>(
+        data,
+        centroid,
+        dim,
+        extra_bits,
+        total_bits,
+        t_const,
+        residual_arr,
+        total_code,
+        base_code_int,
+        extra_raw
+    );
     const T* residual = residual_arr.data();
 
-    // One sign bit plus mag_bits of magnitude makes up the combined code.
-    const size_t mag_bits = total_bits - 1;
-    std::vector<uint8_t> mag_code(dim, 0);
-
-    if (mag_bits > 0) {
-        ex_bits::ex_bits_code<T, uint8_t>(
-            residual, dim, mag_bits, mag_code.data(), t_const
-        );
-    }
-
-    std::vector<int> total_code(dim);
-    for (size_t i = 0; i < dim; ++i) {
-        total_code[i] = static_cast<int>(mag_code[i]) +
-                        (static_cast<int>(residual[i] >= 0) << mag_bits);
-    }
-
-    const auto extra_mask =
-        (extra_bits > 0) ? static_cast<int>((1U << extra_bits) - 1) : 0;
     std::vector<uint8_t> base_raw(dim);
-    std::vector<int> base_code_int(dim);
-    std::vector<uint8_t> extra_raw(extra_bits > 0 ? dim : 0);
     for (size_t i = 0; i < dim; ++i) {
-        int base_val = total_code[i] >> extra_bits;
-        base_code_int[i] = base_val;
-        base_raw[i] = static_cast<uint8_t>(base_val);
-        if (extra_bits > 0) {
-            extra_raw[i] = static_cast<uint8_t>(total_code[i] & extra_mask);
-        }
+        base_raw[i] = static_cast<uint8_t>(base_code_int[i]);
     }
 
     // Base layer first: its factors describe the filter code on its own.
@@ -852,6 +927,134 @@ inline void xy_split_code_with_factor(
 
     // Refine layer: the same derivation over the combined code.
     ExDataMap<T> extra_map(xy_extra_data, dim, extra_bits);
+    T f_error_ex = 0;
+    code_factors<T>(
+        residual,
+        centroid,
+        dim,
+        total_code.data(),
+        -(static_cast<float>((1U << total_bits) - 1) / 2.F),
+        extra_map.f_add_ex(),
+        extra_map.f_rescale_ex(),
+        f_error_ex,
+        metric_type
+    );
+
+    ex_bits::packing_rabitqplus_code(
+        extra_raw.data(), extra_map.ex_code(), dim, extra_bits
+    );
+}
+
+/**
+ * @brief Quantize one vector into a (2 + extra_bits)-bit code and write the
+ *        two-level base layer plus the refine layer into their data blocks.
+ *
+ * Same code and same factors as xy_split_code_with_factor(data, ..., 2,
+ * extra_bits, ...) -- only the base layer's *storage* differs. Instead of one
+ * pack_excode-packed 2-bit code, the base region holds two 1-bit planes:
+ *
+ *   plane_hi[j] = base_code[j] >> 1   (the sign bit of the combined code)
+ *   plane_lo[j] = base_code[j] & 1
+ *
+ * both written with pack_binary, so plane_hi is bit-for-bit the code
+ * one_bit_compact_code() would produce for the same (data, centroid) and is
+ * readable by warmup_ip_x0_q_512, while both planes are readable by
+ * mask_ip_x0_q. That is what lets the search path estimate at 1 bit before
+ * paying for 2 (see HierarchicalNSW::progressive_dist).
+ *
+ * The base layer's three factors describe the 2-bit code (cb = -1.5), not
+ * plane_hi on its own; the 1-bit stage reuses them (see the plan doc,
+ * docs/two-level-quant-plan.md §2.3).
+ *
+ * @param base_data  destination block, TwoBitBaseDataMap layout
+ * @param extra_data destination block, ExDataMap layout; may be nullptr when
+ *                   extra_bits == 0
+ */
+template <typename T>
+inline void two_level_split_code_with_factor(
+    const T* data,
+    const T* centroid,
+    size_t dim,
+    size_t extra_bits,
+    char* base_data,
+    char* extra_data,
+    MetricType metric_type = METRIC_L2,
+    double t_const = -1
+) {
+    constexpr size_t kBaseBits = 2;
+    assert(extra_bits <= 8);
+    const size_t total_bits = kBaseBits + extra_bits;
+    if (total_bits > kMaxCombinedBits) {
+        throw std::invalid_argument(
+            "two_level_split_code_with_factor(): 2 + extra_bits must be <= " +
+            std::to_string(kMaxCombinedBits)
+        );
+    }
+
+    RowMajorArray<T> residual_arr;
+    std::vector<int> total_code;
+    std::vector<int> base_code_int;
+    std::vector<uint8_t> extra_raw;
+    split_combined_code<T>(
+        data,
+        centroid,
+        dim,
+        extra_bits,
+        total_bits,
+        t_const,
+        residual_arr,
+        total_code,
+        base_code_int,
+        extra_raw
+    );
+    const T* residual = residual_arr.data();
+
+    TwoBitBaseDataMap<T> base_map(base_data, dim);
+
+    std::vector<int> plane_hi(dim);
+    std::vector<int> plane_lo(dim);
+    for (size_t i = 0; i < dim; ++i) {
+        plane_hi[i] = base_code_int[i] >> 1;
+        plane_lo[i] = base_code_int[i] & 1;
+    }
+
+    // plane_hi is a 1-bit RaBitQ code in its own right, so it gets the
+    // factors derived for one, at cb = -1/2. These are bit-for-bit what
+    // one_bit_code_with_factor would produce, and they are what makes
+    // stage 1's lower bound a calibrated one rather than an improvisation.
+    code_factors<T>(
+        residual,
+        centroid,
+        dim,
+        plane_hi.data(),
+        -0.5F,
+        base_map.f_add_1(),
+        base_map.f_rescale_1(),
+        base_map.f_error_1(),
+        metric_type
+    );
+
+    code_factors<T>(
+        residual,
+        centroid,
+        dim,
+        base_code_int.data(),
+        -(static_cast<float>((1U << kBaseBits) - 1) / 2.F),
+        base_map.f_add(),
+        base_map.f_rescale(),
+        base_map.f_error(),
+        metric_type
+    );
+
+    pack_binary(plane_hi.data(), base_map.plane_hi(), dim);
+    pack_binary(plane_lo.data(), base_map.plane_lo(), dim);
+
+    if (extra_bits == 0) {
+        return;
+    }
+
+    // Refine layer: unchanged from the generic x+y path.
+    ExDataMap<T> extra_map(extra_data, dim, extra_bits);
     T f_error_ex = 0;
     code_factors<T>(
         residual,

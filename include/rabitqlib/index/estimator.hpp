@@ -332,8 +332,8 @@ inline void xy_base_estdist(
 
     ip_base = base_ip_func(q_obj.rotated_query(), cur_base.base_code(), padded_dim);
 
-    est_dist =
-        cur_base.f_add() + g_add + (cur_base.f_rescale() * (ip_base + q_obj.kbxsumq_base()));
+    est_dist = cur_base.f_add() + g_add +
+               (cur_base.f_rescale() * (ip_base + q_obj.kbxsumq_base()));
 
     low_dist = est_dist - (cur_base.f_error() * g_error);
 }
@@ -367,7 +367,8 @@ inline float xy_distance_boosting(
     float ip = (static_cast<float>(1 << extra_bits) * ip_base) +
                extra_ip_func(q_obj.rotated_query(), cur_extra.ex_code(), padded_dim);
 
-    return cur_extra.f_add_ex() + g_add + (cur_extra.f_rescale_ex() * (ip + q_obj.kbxsumq()));
+    return cur_extra.f_add_ex() + g_add +
+           (cur_extra.f_rescale_ex() * (ip + q_obj.kbxsumq()));
 }
 
 /**
@@ -411,6 +412,139 @@ inline void xy_single_fulldist(
 
     low_dist =
         est_dist - (cur_base.f_error() * g_error / static_cast<float>(1 << extra_bits));
+}
+
+/**
+ * @brief Stage 1 of the two-level (2+x) progressive estimate: 1 bit of the
+ * data code against the *quantized* query, via popcount.
+ *
+ * Reads only the base region's high plane and its three factors -- the
+ * contiguous prefix of the block -- so a candidate rejected here never pulls
+ * plane_lo or the extra region into cache.
+ *
+ * The high plane is a genuine 1-bit RaBitQ code (it is the combined code's
+ * sign bit; see two_level_split_code_with_factor) and it is stored with its
+ * own factor triple, derived at cb = -1/2. So this is exactly
+ * split_single_estdist -- the same estimate and the same calibrated lower
+ * bound the 1+y path has always pruned on -- reading the two-level layout
+ * instead of a BinDataMap.
+ *
+ * Deriving stage 1's bound from the 2-bit layer's f_error instead, to save
+ * storing the second triple, does not work: it over-prunes, and the damage
+ * grows with dimension (recall@10 0.73 vs 0.98 on gist at dim 960, while
+ * looking harmless at dim 128). See docs/two-level-quant-plan.md.
+ */
+template <class Kernel>
+inline void two_level_estdist_1bit(
+    const char* base_data,
+    const TwoLevelQuery<float>& q_obj,
+    size_t padded_dim,
+    float& est_dist,
+    float& low_dist,
+    float g_add,
+    float g_error
+) {
+    ConstTwoBitBaseDataMap<float> cur_base(base_data, padded_dim);
+
+    float ip_hi = Kernel::warmup_ip_x0_q_512(
+        cur_base.plane_hi(),
+        q_obj.query_bin(),
+        q_obj.delta(),
+        q_obj.vl(),
+        padded_dim,
+        q_obj.num_bits()
+    );
+
+    est_dist =
+        cur_base.f_add_1() + g_add + (cur_base.f_rescale_1() * (ip_hi + q_obj.k1xsumq()));
+
+    low_dist = est_dist - (cur_base.f_error_1() * g_error);
+}
+
+/**
+ * @brief Stage 2: the full 2-bit base code against the *float* query.
+ *
+ * c_j = 2*hi_j + lo_j, so the inner product is two masked-load passes, one
+ * per plane. Exact for this layer -- no substitution -- so low_dist is the
+ * base layer's own f_error bound, unwidened.
+ *
+ * Stage 1's inner product cannot be reused here: it was taken against the
+ * quantized query, this one is against the float query. That is inherent to
+ * the design; stage 1 is cheap enough to discard.
+ *
+ * @param ip_base out: <rotated_query, base_code>, fed straight into
+ *                two_level_boosting so stage 3 does not recompute it
+ */
+template <class Kernel>
+inline void two_level_estdist_2bit(
+    const char* base_data,
+    const TwoLevelQuery<float>& q_obj,
+    size_t padded_dim,
+    float& ip_base,
+    float& est_dist,
+    float& low_dist,
+    float g_add,
+    float g_error
+) {
+    ConstTwoBitBaseDataMap<float> cur_base(base_data, padded_dim);
+    const float* query = q_obj.rotated_query();
+
+    ip_base = (2.F * Kernel::mask_ip_x0_q(query, cur_base.plane_hi(), padded_dim)) +
+              Kernel::mask_ip_x0_q(query, cur_base.plane_lo(), padded_dim);
+
+    est_dist =
+        cur_base.f_add() + g_add + (cur_base.f_rescale() * (ip_base + q_obj.kbase_sumq()));
+
+    low_dist = est_dist - (cur_base.f_error() * g_error);
+}
+
+/**
+ * @brief Stage 3: boost the 2-bit estimate to the full (2+x)-bit one.
+ *
+ * Same identity as split_distance_boosting / xy_distance_boosting, with the
+ * base inner product handed in rather than recomputed:
+ *
+ *   ip(total) == ip(base) * 2^extra_bits + ip(extra)
+ *
+ * Only the extra region is touched.
+ *
+ * Produces the refined lower bound too, on the same footing as
+ * split_single_fulldist_direct: the base layer's f_error scaled down by
+ * 2^extra_bits, matching the narrower spread of a (2+x)-bit estimate.
+ * base_f_error is passed in so this call does not re-read the base block.
+ *
+ * IMPORTANT: that bound is for the record, not for the admission decision.
+ * Whether a candidate may enter the result set is settled on the *filter*
+ * stage's bound, which is what progressive_dist's return value reports.
+ * Testing this tighter bound instead rejects candidates the filter stage had
+ * already admitted, and costs about a point of recall (section 7.2 of
+ * docs/two-level-quant-plan.md).
+ *
+ * @param ip_base      value produced by two_level_estdist_2bit for this vector
+ * @param base_f_error the base layer's f_error, likewise
+ */
+inline void two_level_boosting(
+    const char* extra_data,
+    float (*ip_func_)(const float*, const uint8_t*, size_t),
+    const TwoLevelQuery<float>& q_obj,
+    size_t padded_dim,
+    size_t extra_bits,
+    float ip_base,
+    float base_f_error,
+    float& est_dist,
+    float& low_dist,
+    float g_add,
+    float g_error
+) {
+    ConstExDataMap<float> cur_extra(extra_data, padded_dim, extra_bits);
+
+    float ip = (static_cast<float>(1 << extra_bits) * ip_base) +
+               ip_func_(q_obj.rotated_query(), cur_extra.ex_code(), padded_dim);
+
+    est_dist =
+        cur_extra.f_add_ex() + g_add + (cur_extra.f_rescale_ex() * (ip + q_obj.kbxsumq()));
+
+    low_dist = est_dist - (base_f_error * g_error / static_cast<float>(1 << extra_bits));
 }
 
 }  // namespace rabitqlib

@@ -189,6 +189,102 @@ class SplitSingleQuery {
     void set_g_error(T norm) { G_error_ = norm; }
 };
 
+// Query-side prep for the two-level (2+x) path. Deliberately a separate
+// type from SplitSingleQuery rather than a generalization of it: the legacy
+// 1+y path is the performance-critical one and must not shift, so it keeps
+// its own class untouched. The machinery is the same -- the query is scalar
+// quantized to kNumBits and transposed into bit planes, exactly so
+// warmup_ip_x0_q_512 can consume it against the base code's high plane.
+//
+// What differs is the offset-binary corrections. Three code widths get
+// estimated against over the course of one progressive_dist call, so three
+// constants are carried:
+//
+//   k1xsumq()    stage 1, the 1-bit high plane        cb = -1/2
+//   kbase_sumq() stage 2, the 2-bit base code         cb = -3/2
+//   kbxsumq()    stage 3, the combined (2+x)-bit code cb = -(2^(2+x)-1)/2
+//
+// All three are just sumq scaled, so they cost one accumulate at query time.
+template <typename T>
+class TwoLevelQuery {
+   private:
+    const T* rotated_query_;
+    std::vector<uint64_t> QueryBin_;
+    T G_add_ = 0;
+    T G_error_ = 0;
+    T G_1xSumq_ = 0;
+    T G_basexSumq_ = 0;
+    T G_bxSumq_ = 0;
+    T delta_ = 0;
+    T vl_ = 0;
+    MetricType metric_type_ = METRIC_L2;
+
+   public:
+    static constexpr size_t kNumBits = 4;
+    static constexpr size_t kBaseBits = 2;
+
+    explicit TwoLevelQuery(
+        const T* rotated_query,
+        size_t padded_dim,
+        size_t extra_bits,
+        quant::RabitqConfig config,
+        size_t metric_type = METRIC_L2
+    )
+        : rotated_query_(rotated_query), QueryBin_(padded_dim * kNumBits / 64, 0) {
+        const float c_1 = -static_cast<float>((1 << 1) - 1) / 2.F;
+        const float c_base = -static_cast<float>((1 << kBaseBits) - 1) / 2.F;
+        const float c_b = -static_cast<float>((1U << (kBaseBits + extra_bits)) - 1) / 2.F;
+        T sumq =
+            std::accumulate(rotated_query, rotated_query + padded_dim, static_cast<T>(0));
+
+        G_1xSumq_ = sumq * c_1;
+        G_basexSumq_ = sumq * c_base;
+        G_bxSumq_ = sumq * c_b;
+
+        metric_type_ = (metric_type == METRIC_IP) ? METRIC_IP : METRIC_L2;
+
+        std::vector<uint8_t> quant_query(padded_dim);
+
+        quant::quantize_scalar<float, uint8_t>(
+            rotated_query, padded_dim, kNumBits, quant_query.data(), delta_, vl_, config
+        );
+
+        rabitqlib::new_transpose_bin_512(
+            quant_query.data(), QueryBin_.data(), padded_dim, kNumBits
+        );
+    }
+
+    [[nodiscard]] size_t num_bits() const { return kNumBits; }
+
+    [[nodiscard]] const uint64_t* query_bin() const { return QueryBin_.data(); }
+
+    [[nodiscard]] const T* rotated_query() const { return rotated_query_; }
+
+    [[nodiscard]] T delta() const { return delta_; }
+
+    [[nodiscard]] T vl() const { return vl_; }
+
+    [[nodiscard]] T k1xsumq() const { return G_1xSumq_; }
+
+    [[nodiscard]] T kbase_sumq() const { return G_basexSumq_; }
+
+    [[nodiscard]] T kbxsumq() const { return G_bxSumq_; }
+
+    [[nodiscard]] T g_add() const { return G_add_; }
+
+    [[nodiscard]] T g_error() const { return G_error_; }
+
+    void set_g_add(T norm, T ip = 0) {
+        if (metric_type_ == METRIC_L2) {
+            G_add_ = norm * norm;
+            G_error_ = norm;
+        } else if (metric_type_ == METRIC_IP) {
+            G_add_ = -ip;
+            G_error_ = norm;
+        }
+    }
+};
+
 // Query-side prep for x+y quantization. No popcount/FastScan path here --
 // both the base filter and the boosted refine step read their codes via
 // generic SIMD dot kernels (see xy_base_estdist / xy_fulldist_boosting), so

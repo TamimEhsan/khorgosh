@@ -69,13 +69,7 @@ class HierarchicalNSW {
         size_t, size_t, size_t, size_t, size_t, size_t = 100, MetricType = METRIC_L2
     );
     explicit HierarchicalNSW(
-        size_t,
-        size_t,
-        XyQuantBits,
-        size_t,
-        size_t,
-        size_t = 100,
-        MetricType = METRIC_L2
+        size_t, size_t, XyQuantBits, size_t, size_t, size_t = 100, MetricType = METRIC_L2
     );
     ~HierarchicalNSW();
 
@@ -161,12 +155,13 @@ class HierarchicalNSW {
     );
 
     static constexpr PID kMaxLabelOperationLock = 65536;
-    // Bumped because save()/load() gained base_bits_/extra_bits_ and the
-    // XY data region fields -- files saved before this must be rebuilt,
-    // load() rejects anything with a different version outright. Bumped
-    // again when the XY layout dropped its duplicated copy of the base code
-    // (the two regions changed size), so v2 files are also rejected.
-    static constexpr uint32_t kFormatVersion = 3;
+    // Bumped whenever the on-disk element layout changes; load() rejects any
+    // other version outright, and there is no migration shim.
+    //   v2 -> v3  the x+y layout dropped its duplicated copy of the base code
+    //   v3 -> v4  the 2+x base region became two 1-bit planes around its
+    //             factors (TwoBitBaseDataMap) instead of a packed 2-bit
+    //             excode, and base_bits is gated to {1, 2}
+    static constexpr uint32_t kFormatVersion = 4;
     size_t max_elements_{0};
     mutable std::atomic<size_t> cur_element_count_{0};  // current number of elements
     size_t size_data_per_element_{0};
@@ -195,18 +190,19 @@ class HierarchicalNSW {
     size_t size_bin_data_{0}, size_ex_data_{0};
     size_t ex_bits_{0};
 
-    // XY-mode storage/search path fields (see XyQuantBits ctor). Unused
-    // (left zero/null) when xy_mode_ is false, which keeps the fields above
-    // and the classic popcount/BinData/ExData path fully in play.
-    // xy_mode_ -- NOT base_bits_ == 1 -- is what selects the storage path:
-    // base_bits_ can legitimately be 1 via the XyQuantBits ctor too (a
-    // 1-bit XY base with y extra bits), which must still use
-    // BaseDataMap/ExDataMap, not BinDataMap/ExDataMap.
-    bool xy_mode_{false};
+    // Two-level (2+x) storage/search path fields, set by the XyQuantBits
+    // constructor when base_bits == 2. Unused (left zero) otherwise, which
+    // keeps the fields above and the classic popcount/BinData/ExData path
+    // fully in play.
+    //
+    // two_level_mode_ selects the storage path and, since base_bits is gated
+    // to {1, 2} with 1 routed to the legacy layout, it now holds exactly when
+    // base_bits_ == 2. The two are kept as separate fields anyway so the file
+    // format does not have to be re-versioned if that gate ever widens.
+    bool two_level_mode_{false};
     size_t base_bits_{1};
-    size_t offsetXYBaseData_{0}, offsetXYExtraData_{0};
-    size_t size_xy_base_data_{0}, size_xy_extra_data_{0};
-    float (*xy_base_ip_func_)(const float*, const uint8_t*, size_t){nullptr};
+    size_t offsetBaseData_{0}, offsetExtraData_{0};
+    size_t size_base_data_{0}, size_extra_data_{0};
 
     // Layout: (# of edges + edges) + (cluster_id) + (External_id) + (BinData) + (ExData)
     char* data_level0_memory_{nullptr};
@@ -310,15 +306,15 @@ class HierarchicalNSW {
         );
     }
 
-    char* get_xybasedata_by_internalid(PID internal_id) const {
+    char* get_basedata_by_internalid(PID internal_id) const {
         return reinterpret_cast<char*>(
-            data_level0_memory_ + (internal_id * size_data_per_element_) + offsetXYBaseData_
+            data_level0_memory_ + (internal_id * size_data_per_element_) + offsetBaseData_
         );
     }
 
-    char* get_xyextradata_by_internalid(PID internal_id) const {
+    char* get_extradata_by_internalid(PID internal_id) const {
         return reinterpret_cast<char*>(
-            data_level0_memory_ + (internal_id * size_data_per_element_) + offsetXYExtraData_
+            data_level0_memory_ + (internal_id * size_data_per_element_) + offsetExtraData_
         );
     }
 
@@ -376,19 +372,29 @@ class HierarchicalNSW {
     get_full_est_direct(std::vector<float>&, SplitSingleQuery<float>&, PID, HierarchicalNSW::EstimateRecord&)
         const;
 
-    void get_xybase_est(
-        std::vector<float>&, XYQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
-    ) const;
-
-    void get_xyfull_est(
-        std::vector<float>&, XYQuery<float>&, PID, HierarchicalNSW::EstimateRecord&
+    // Progressive distance for the 2+x path: estimate at 1 bit, then 2, then
+    // the full 2+x width, stopping as soon as low_dist alone settles whether
+    // the candidate can enter the result set. See hnsw_two_level.hpp.
+    // Returns false if a filter stage settled that this candidate cannot
+    // reach `threshold`, true if it ran to the full width. That return value
+    // -- not res.low_dist -- is the admission decision, because res.low_dist
+    // ends up holding the *refined* bound once stage 3 runs.
+    template <class Kernel>
+    bool progressive_dist(
+        std::vector<float>& q_to_centroids,
+        TwoLevelQuery<float>& query,
+        PID currObj,
+        float threshold,
+        HierarchicalNSW::EstimateRecord& res
     ) const;
 
     maxheap<std::pair<float, PID>> search_knn(const float*, size_t);
 
-    // XY-mode counterpart of search_knn_direct<Kernel>'s body; factored out
-    // (see hnsw_xy.hpp) so search_knn_direct itself stays a thin dispatch.
-    maxheap<std::pair<float, PID>> search_knn_direct_xy(
+    // Two-level counterpart of search_knn_direct<Kernel>'s body; factored out
+    // (see hnsw_two_level.hpp) so search_knn_direct itself stays a thin
+    // dispatch.
+    template <class Kernel>
+    maxheap<std::pair<float, PID>> search_knn_direct_two_level(
         const float* rotated_query, size_t TOPK, std::vector<float>& q_to_centroids
     );
 
@@ -406,11 +412,12 @@ class HierarchicalNSW {
         BoundedKNN& boundedKNN
     );
 
-    void searchBaseLayerST_AdaptiveRerankOptDirectXY(
+    template <class Kernel>
+    void searchBaseLayerST_TwoLevel(
         PID ep_id,
         size_t ef,
         size_t TOPK,
-        XYQuery<float>& query,
+        TwoLevelQuery<float>& query,
         std::vector<float>& q_to_centroids,
         BoundedKNN& boundedKNN
     );
@@ -427,57 +434,42 @@ class HierarchicalNSW {
 
     // quantize_fn(cur_c, cluster_id, rotated_data) performs the actual
     // quantization + storage step; construct() builds the right closure for
-    // the index's mode (base_bits_==1 vs XY) so add_point's link/level
-    // bookkeeping doesn't need to be duplicated per mode.
+    // the index's mode (1+y vs 2+x) so add_point's link/level bookkeeping
+    // doesn't need to be duplicated per mode.
     void add_point(PID, PID, const std::function<void(PID, PID, const float*)>&);
 
-    // Builds construct()'s quantize_fn closure for the XY mode (see
-    // hnsw_xy.hpp); construct() itself keeps its non-XY branch unchanged.
-    std::function<void(PID, PID, const float*)> make_xy_quantize_fn(bool faster);
+    // Builds construct()'s quantize_fn closure for the 2+x mode (see
+    // hnsw_two_level.hpp); the 1+y branch is unchanged.
+    std::function<void(PID, PID, const float*)> make_two_level_quantize_fn(bool faster);
 
     maxheap<std::pair<float, PID>> search_base_layer(PID, PID, int);
+
+    // Constructor building blocks, shared by the 1+y and 2+x entry points.
+    void init_geometry_and_graph(size_t, size_t, size_t, size_t);
+    void init_legacy_layout();
+    void init_two_level_layout();
+    void allocate_storage(size_t);
 
     PID mutually_connect_new_element(PID, maxheap<std::pair<float, PID>>&, int);
 
     void get_neighbors_by_heuristic2(maxheap<std::pair<float, PID>>&, size_t);
 };
 
-inline HierarchicalNSW::HierarchicalNSW(
-    size_t max_elements,
-    size_t dim,
-    size_t total_bits,
-    size_t M,
-    size_t ef_construction,
-    size_t random_seed,
-    MetricType metric_type
-)
-    : metric_type_(metric_type)
-    , label_op_locks_(kMaxLabelOperationLock)
-    , link_list_locks_(max_elements)
-    , element_levels_(max_elements)
-    , raw_dist_func_((metric_type == METRIC_IP) ? dot_product_dis<float> : euclidean_sqr<float>) {
+// Everything both constructors do before they know anything about the code
+// width: geometry, the rotator, and the graph parameters. Leaves
+// size_links_level0_ and label_offset_ set, so a layout initializer can lay
+// its data regions out immediately after the label.
+inline void HierarchicalNSW::init_geometry_and_graph(
+    size_t max_elements, size_t dim, size_t M, size_t ef_construction
+) {
     max_elements_ = max_elements;
     dim_ = dim;
     rotator_ = choose_rotator<float>(
         dim, RotatorType::FhtKacRotator, round_up_to_multiple(dim_, 64)
     );
     padded_dim_ = rotator_->size();
-    /* check size */
     assert(padded_dim_ % 64 == 0);
     assert(padded_dim_ >= dim_);
-    ex_bits_ = total_bits - 1;
-
-    if (total_bits < 1 || total_bits > 9) {
-        std::cerr << "Invalid number of bits for quantization in "
-                     "HierarchicalNSW::HierarchicalNSW\n";
-        std::cerr << "Expected: 1 to 9  Input:" << total_bits << '\n';
-        std::cerr.flush();
-        exit(1);
-    };
-
-    assert(padded_dim_ % 64 == 0);
-
-    ip_func_ = select_excode_ipfunc(ex_bits_);
 
     if (M <= 10000) {
         M_ = M;
@@ -493,18 +485,42 @@ inline HierarchicalNSW::HierarchicalNSW(
     ef_construction_ = std::max(ef_construction, M_);
     ef_ = 10;
 
+    // (# of edges + edges) + (cluster_id) + (external label) + <data regions>
+    size_links_level0_ = maxM0_ * sizeof(PID) + sizeof(PID);
+    label_offset_ = size_links_level0_ + sizeof(PID);
+}
+
+// 1+y layout: BinData (1-bit code + 3 factors) then ExData. Reads ex_bits_.
+inline void HierarchicalNSW::init_legacy_layout() {
+    two_level_mode_ = false;
+    base_bits_ = 1;
+    ip_func_ = select_excode_ipfunc(ex_bits_);
+
     size_bin_data_ = BinDataMap<float>::data_bytes(padded_dim_);
     size_ex_data_ = ExDataMap<float>::data_bytes(padded_dim_, ex_bits_);
-    size_links_level0_ = maxM0_ * sizeof(PID) + sizeof(PID);
-    label_offset_ =
-        size_links_level0_ + sizeof(PID);  // (# of edges + edges) + (cluster_id)
-    offsetBinData_ = label_offset_ +
-                     sizeof(PID);  // (# of edges + edges) + (cluster_id) + (external label)
-    offsetExData_ = offsetBinData_ + size_bin_data_;  // (# of edges + edges) + (cluster_id)
-                                                      // + (external label) + (BinData)
-    size_data_per_element_ =
-        offsetExData_ + size_ex_data_;  // (# of edges + edges) + (cluster_id) + (external
-                                        // label) + (BinData) + (ExData)
+    offsetBinData_ = label_offset_ + sizeof(PID);
+    offsetExData_ = offsetBinData_ + size_bin_data_;
+    size_data_per_element_ = offsetExData_ + size_ex_data_;
+}
+
+// 2+x layout: the two-plane base region (TwoBitBaseDataMap) then ExData.
+// Reads ex_bits_. There is no base-side excode ip function here -- the base
+// code is two 1-bit planes, read by the binary kernels.
+inline void HierarchicalNSW::init_two_level_layout() {
+    two_level_mode_ = true;
+    base_bits_ = 2;
+    ip_func_ = (ex_bits_ > 0) ? select_excode_ipfunc(ex_bits_) : nullptr;
+
+    size_base_data_ = TwoBitBaseDataMap<float>::data_bytes(padded_dim_);
+    size_extra_data_ = ExDataMap<float>::data_bytes(padded_dim_, ex_bits_);
+    offsetBaseData_ = label_offset_ + sizeof(PID);
+    offsetExtraData_ = offsetBaseData_ + size_base_data_;
+    size_data_per_element_ = offsetExtraData_ + size_extra_data_;
+}
+
+// Allocate level-0 storage and initialize the rest of the graph state. Runs
+// after a layout initializer has set size_data_per_element_.
+inline void HierarchicalNSW::allocate_storage(size_t random_seed) {
     data_level0_memory_ =
         memory::huge_page_allocate<char>(max_elements_ * size_data_per_element_);
     if (data_level0_memory_ == nullptr) {
@@ -530,8 +546,43 @@ inline HierarchicalNSW::HierarchicalNSW(
     mult_ = 1 / log(1.0 * static_cast<double>(M_));
     revSize_ = 1.0 / mult_;
 
+    // SplitSingleQuery and TwoLevelQuery both quantize the query to 4 bits,
+    // so one config serves either path.
     this->query_config_ =
         quant::faster_config(padded_dim_, SplitSingleQuery<float>::kNumBits);
+}
+
+inline HierarchicalNSW::HierarchicalNSW(
+    size_t max_elements,
+    size_t dim,
+    size_t total_bits,
+    size_t M,
+    size_t ef_construction,
+    size_t random_seed,
+    MetricType metric_type
+)
+    : metric_type_(metric_type)
+    , label_op_locks_(kMaxLabelOperationLock)
+    , link_list_locks_(max_elements)
+    , element_levels_(max_elements)
+    , raw_dist_func_((metric_type == METRIC_IP) ? dot_product_dis<float> : euclidean_sqr<float>) {
+    init_geometry_and_graph(max_elements, dim, M, ef_construction);
+
+    // 9, not kMaxCombinedBits (10): the 1+y layout spends total_bits - 1 on
+    // the ex code, and pack_excode / select_excode_ipfunc only go to 8 bits.
+    // A 10-bit code is reachable only as the two-level 2+8, where the base
+    // is two 1-bit planes and the ex code stays within 8.
+    constexpr size_t kMaxLegacyTotalBits = 9;
+    if (total_bits < 1 || total_bits > kMaxLegacyTotalBits) {
+        throw std::invalid_argument(
+            "HierarchicalNSW: total_bits must be in [1, " +
+            std::to_string(kMaxLegacyTotalBits) + "], got " + std::to_string(total_bits)
+        );
+    }
+    ex_bits_ = total_bits - 1;
+
+    init_legacy_layout();
+    allocate_storage(random_seed);
 }
 
 inline HierarchicalNSW::~HierarchicalNSW() { free_memory(); }
@@ -547,20 +598,20 @@ inline void HierarchicalNSW::save(const char* filename) const {
     output.write(reinterpret_cast<const char*>(&dim_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&padded_dim_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&num_cluster_), sizeof(size_t));
-    output.write(reinterpret_cast<const char*>(&xy_mode_), sizeof(bool));
+    output.write(reinterpret_cast<const char*>(&two_level_mode_), sizeof(bool));
     output.write(reinterpret_cast<const char*>(&base_bits_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&ex_bits_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&metric_type_), sizeof(metric_type_));
 
     output.write(reinterpret_cast<const char*>(&size_bin_data_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&size_ex_data_), sizeof(size_t));
-    output.write(reinterpret_cast<const char*>(&size_xy_base_data_), sizeof(size_t));
-    output.write(reinterpret_cast<const char*>(&size_xy_extra_data_), sizeof(size_t));
+    output.write(reinterpret_cast<const char*>(&size_base_data_), sizeof(size_t));
+    output.write(reinterpret_cast<const char*>(&size_extra_data_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&size_links_level0_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&offsetBinData_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&offsetExData_), sizeof(size_t));
-    output.write(reinterpret_cast<const char*>(&offsetXYBaseData_), sizeof(size_t));
-    output.write(reinterpret_cast<const char*>(&offsetXYExtraData_), sizeof(size_t));
+    output.write(reinterpret_cast<const char*>(&offsetBaseData_), sizeof(size_t));
+    output.write(reinterpret_cast<const char*>(&offsetExtraData_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&label_offset_), sizeof(PID));
     output.write(reinterpret_cast<const char*>(&size_data_per_element_), sizeof(size_t));
     output.write(reinterpret_cast<const char*>(&size_links_per_element_), sizeof(size_t));
@@ -625,29 +676,33 @@ inline void HierarchicalNSW::load(const char* filename) {
     input.read(reinterpret_cast<char*>(&dim_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&padded_dim_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&num_cluster_), sizeof(size_t));
-    input.read(reinterpret_cast<char*>(&xy_mode_), sizeof(bool));
+    input.read(reinterpret_cast<char*>(&two_level_mode_), sizeof(bool));
     input.read(reinterpret_cast<char*>(&base_bits_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&ex_bits_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&metric_type_), sizeof(metric_type_));
     raw_dist_func_ =
         (metric_type_ == METRIC_IP) ? dot_product_dis<float> : euclidean_sqr<float>;
 
-    if (!xy_mode_) {
-        ip_func_ = select_excode_ipfunc(ex_bits_);
-    } else {
-        xy_base_ip_func_ = select_excode_ipfunc(base_bits_);
-        ip_func_ = (ex_bits_ > 0) ? select_excode_ipfunc(ex_bits_) : nullptr;
+    if (two_level_mode_ && base_bits_ != 2) {
+        throw std::runtime_error(
+            "HierarchicalNSW::load: two-level index with base_bits != 2; this build "
+            "only supports base_bits 1 (legacy layout) and 2"
+        );
     }
+    // The 2+x base code is two 1-bit planes read by the binary kernels, so
+    // only the extra region needs an excode ip function.
+    ip_func_ =
+        (!two_level_mode_ || ex_bits_ > 0) ? select_excode_ipfunc(ex_bits_) : nullptr;
 
     input.read(reinterpret_cast<char*>(&size_bin_data_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&size_ex_data_), sizeof(size_t));
-    input.read(reinterpret_cast<char*>(&size_xy_base_data_), sizeof(size_t));
-    input.read(reinterpret_cast<char*>(&size_xy_extra_data_), sizeof(size_t));
+    input.read(reinterpret_cast<char*>(&size_base_data_), sizeof(size_t));
+    input.read(reinterpret_cast<char*>(&size_extra_data_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&size_links_level0_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&offsetBinData_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&offsetExData_), sizeof(size_t));
-    input.read(reinterpret_cast<char*>(&offsetXYBaseData_), sizeof(size_t));
-    input.read(reinterpret_cast<char*>(&offsetXYExtraData_), sizeof(size_t));
+    input.read(reinterpret_cast<char*>(&offsetBaseData_), sizeof(size_t));
+    input.read(reinterpret_cast<char*>(&offsetExtraData_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&label_offset_), sizeof(PID));
     input.read(reinterpret_cast<char*>(&size_data_per_element_), sizeof(size_t));
     input.read(reinterpret_cast<char*>(&size_links_per_element_), sizeof(size_t));
@@ -755,7 +810,7 @@ inline void HierarchicalNSW::construct(
     }
 
     std::function<void(PID, PID, const float*)> quantize_fn;
-    if (!xy_mode_) {
+    if (!two_level_mode_) {
         quant::RabitqConfig config;
         if (faster) {
             config = quant::faster_config(padded_dim_, ex_bits_ + 1);
@@ -773,7 +828,7 @@ inline void HierarchicalNSW::construct(
             );
         };
     } else {
-        quantize_fn = make_xy_quantize_fn(faster);
+        quantize_fn = make_two_level_quantize_fn(faster);
     }
 
     std::cout << "Start HierarchicalNSW construction..." << '\n';
@@ -790,7 +845,9 @@ inline void HierarchicalNSW::construct(
 }
 
 inline void HierarchicalNSW::add_point(
-    PID label, PID cluster_id, const std::function<void(PID, PID, const float*)>& quantize_fn
+    PID label,
+    PID cluster_id,
+    const std::function<void(PID, PID, const float*)>& quantize_fn
 ) {
     std::unique_lock<std::mutex> lock_label(get_lable_op_mutex(label));
 
@@ -937,19 +994,19 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_base_layer(
         if (cur_node_num >= cur_element_count_ || size > maxM0_) {
             std::cerr << "BAD NODE: cur_node_num=" << cur_node_num
                       << " cur_element_count_=" << cur_element_count_.load()
-                      << " size=" << size << " maxM0_=" << maxM0_
-                      << " layer=" << layer << " cur_c=" << cur_c << " ep_id=" << ep_id
-                      << "\n" << std::flush;
+                      << " size=" << size << " maxM0_=" << maxM0_ << " layer=" << layer
+                      << " cur_c=" << cur_c << " ep_id=" << ep_id << "\n"
+                      << std::flush;
             std::abort();
         }
         for (size_t dbg = 0; dbg < size; ++dbg) {
             if (datal[dbg] >= cur_element_count_) {
-                std::cerr << "BAD NEIGHBOR: cur_node_num=" << cur_node_num
-                          << " idx=" << dbg << " datal[idx]=" << datal[dbg]
+                std::cerr << "BAD NEIGHBOR: cur_node_num=" << cur_node_num << " idx=" << dbg
+                          << " datal[idx]=" << datal[dbg]
                           << " cur_element_count_=" << cur_element_count_.load()
-                          << " size=" << size << " layer=" << layer
-                          << " cur_c=" << cur_c << " ep_id=" << ep_id
-                          << "\n" << std::flush;
+                          << " size=" << size << " layer=" << layer << " cur_c=" << cur_c
+                          << " ep_id=" << ep_id << "\n"
+                          << std::flush;
                 std::abort();
             }
         }
@@ -1304,8 +1361,8 @@ inline maxheap<std::pair<float, PID>> HierarchicalNSW::search_knn_direct(
         }
     }
 
-    if (xy_mode_) {
-        return search_knn_direct_xy(rotated_query, TOPK, q_to_centroids);
+    if (two_level_mode_) {
+        return search_knn_direct_two_level<Kernel>(rotated_query, TOPK, q_to_centroids);
     }
 
     SplitSingleQuery<float> query_wrapper(
@@ -1470,4 +1527,4 @@ inline void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOptDirect(
 
 }  // namespace rabitqlib::hnsw
 
-#include "rabitqlib/index/hnsw/hnsw_xy.hpp"
+#include "rabitqlib/index/hnsw/hnsw_two_level.hpp"
