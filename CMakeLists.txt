@@ -5,6 +5,16 @@ project(RaBitQLib VERSION 0.3.8 LANGUAGES CXX)
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
+# AVX2/AVX-512 intrinsics are not expressible source code on a non-x86
+# compiler, so the source groups and flags that use them (below) can only be
+# compiled on x86 targets.
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" RABITQLIB_SYSTEM_PROCESSOR_LOWER)
+if(RABITQLIB_SYSTEM_PROCESSOR_LOWER MATCHES "^(x86_64|amd64|x86|i[3-6]86)$")
+    set(RABITQLIB_TARGET_X86 ON)
+else()
+    set(RABITQLIB_TARGET_X86 OFF)
+endif()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -65,44 +75,60 @@ set(RABITQ_COMMON_SOURCES
     src/simd/matrix_generic.cpp
 )
 
-set(RABITQ_AVX2_SOURCES
-    src/simd/quantization_avx2.cpp
-    src/simd/pack_excode_avx2.cpp
-    src/simd/space_excode_avx2.cpp
-    src/simd/space_avx2.cpp
-    src/simd/fastscan_avx2.cpp
-    src/simd/estimator_avx2.cpp
-    src/simd/matrix_avx2.cpp
-    src/simd/warmup_avx2.cpp
-    src/simd/rotator_avx2.cpp
-)
+set(RABITQ_AVX2_SOURCES)
+set(RABITQ_AVX512_SOURCES)
+set(RABITQ_AVX512_POPCNT_SOURCES)
+set(RABITQ_HNSW_AVX2_SOURCES)
+set(RABITQ_HNSW_AVX512_CORE_SOURCES)
+set(RABITQ_HNSW_AVX512_POPCNT_SOURCES)
 
-set(RABITQ_AVX512_SOURCES
-    src/simd/quantization_avx512.cpp
-    src/simd/pack_excode_avx512.cpp
-    src/simd/space_excode_avx512.cpp
-    src/simd/space_avx512.cpp
-    src/simd/fastscan_avx512.cpp
-    src/simd/estimator_avx512.cpp
-    src/simd/matrix_avx512.cpp
-    src/simd/rotator_avx512.cpp
-)
+if(RABITQLIB_TARGET_X86)
+    set(RABITQ_AVX2_SOURCES
+        src/simd/quantization_avx2.cpp
+        src/simd/pack_excode_avx2.cpp
+        src/simd/space_excode_avx2.cpp
+        src/simd/space_avx2.cpp
+        src/simd/fastscan_avx2.cpp
+        src/simd/estimator_avx2.cpp
+        src/simd/matrix_avx2.cpp
+        src/simd/warmup_avx2.cpp
+        src/simd/rotator_avx2.cpp
+    )
 
-set(RABITQ_AVX512_POPCNT_SOURCES
-    src/simd/warmup_avx512.cpp
-)
+    set(RABITQ_AVX512_SOURCES
+        src/simd/quantization_avx512.cpp
+        src/simd/pack_excode_avx512.cpp
+        src/simd/space_excode_avx512.cpp
+        src/simd/space_avx512.cpp
+        src/simd/fastscan_avx512.cpp
+        src/simd/estimator_avx512.cpp
+        src/simd/matrix_avx512.cpp
+        src/simd/rotator_avx512.cpp
+    )
 
-set(RABITQ_HNSW_AVX2_SOURCES
-    src/index/hnsw_search_avx2.cpp
-)
+    set(RABITQ_AVX512_POPCNT_SOURCES
+        src/simd/warmup_avx512.cpp
+    )
 
-set(RABITQ_HNSW_AVX512_CORE_SOURCES
-    src/index/hnsw_search_avx512_core.cpp
-)
+    set(RABITQ_HNSW_AVX2_SOURCES
+        src/index/hnsw_search_avx2.cpp
+    )
 
-set(RABITQ_HNSW_AVX512_POPCNT_SOURCES
-    src/index/hnsw_search_avx512_popcnt.cpp
-)
+    set(RABITQ_HNSW_AVX512_CORE_SOURCES
+        src/index/hnsw_search_avx512_core.cpp
+    )
+
+    set(RABITQ_HNSW_AVX512_POPCNT_SOURCES
+        src/index/hnsw_search_avx512_popcnt.cpp
+    )
+else()
+    message(FATAL_ERROR
+        "rabitqlib: unsupported target architecture '${CMAKE_SYSTEM_PROCESSOR}'. "
+        "Only x86_64/i386 are currently supported; portable (Highway-backed) "
+        "dispatch for other architectures is planned but not implemented yet "
+        "(see docs/portability/highway-plan.md)."
+    )
+endif()
 
 add_library(rabitq_core STATIC
     ${RABITQ_COMMON_SOURCES}
@@ -125,6 +151,19 @@ set_target_properties(rabitq_core PROPERTIES
 )
 rabitq_enable_warnings(rabitq_core)
 
+# src/simd/dispatch.cpp is an architecture-selected shell (see
+# docs/portability/highway-plan.md): it #includes dispatch_x86.cpp when
+# RABITQLIB_TARGET_X86 is set. Neither dispatch_x86.cpp nor (eventually)
+# dispatch_highway.cpp is ever added to a source list directly — only the
+# shell is a real translation unit; the bodies would duplicate-define every
+# dispatch symbol if compiled on their own.
+target_compile_definitions(rabitq_core PRIVATE
+    RABITQLIB_TARGET_X86=$<BOOL:${RABITQLIB_TARGET_X86}>
+)
+
+# RABITQ_AVX2_SOURCES etc. are already empty when RABITQLIB_TARGET_X86 is OFF
+# (set above), so these calls are harmless no-ops on non-x86 without needing
+# their own guard.
 if(MSVC)
     set_source_files_properties(
         ${RABITQ_AVX2_SOURCES} ${RABITQ_HNSW_AVX2_SOURCES}
