@@ -91,15 +91,26 @@ float L2NormSqrImpl(const float* a, size_t n) {
 // of each word first), i.e. word = memcpy'd 8 bytes starting at
 // data + (i/64)*8, tested via (word >> (63 - i%64)) & 1. Verified against
 // MaskIpX0Q.Avx2PreservesEveryStoredBitPosition's bit-for-bit convention.
-// The per-lane bit test is scalar (this is not the hottest path relative to
-// the O(padded_dim) float accumulation it feeds); only the summation is
-// vectorized.
+//
+// This is a search hot path (called once per full-distance HNSW candidate;
+// profiling showed it dominating query time even after fixing
+// warmup_ip_x0_q_512_highway's popcount issue), so bit extraction is
+// vectorized too, not just the summation, mirroring mask_ip_x0_q_avx2's own
+// technique: broadcast a lanes-bit chunk of `data` to every lane, right-shift
+// each lane by a descending per-lane amount (lane 0 gets the chunk's
+// highest-order/first bit, i.e. dim i; lane lanes-1 gets its last) so bit 0
+// of each lane isolates that lane's target bit, then use it as a per-lane
+// select for query[i..i+lanes). Requires 64 % lanes == 0 so a lanes-wide
+// group never crosses a 64-bit word boundary; true for every realistic
+// (power-of-two, <= 64) Highway float lane count, but this falls back to
+// the scalar per-bit path instead of assuming it, since a wrong assumption
+// here would silently read the wrong bits rather than fail loudly.
 float MaskIpX0QImpl(
     const float* HWY_RESTRICT query, const uint8_t* HWY_RESTRICT data, size_t padded_dim
 ) {
     const hn::ScalableTag<float> d;
+    const hn::RebindToUnsigned<decltype(d)> du;
     const size_t lanes = hn::Lanes(d);
-    auto sum = hn::Zero(d);
 
     auto bit_at = [&](size_t pos) -> bool {
         uint64_t word = 0;
@@ -107,14 +118,29 @@ float MaskIpX0QImpl(
         return ((word >> (63 - pos % 64)) & 1U) != 0;
     };
 
+    auto sum = hn::Zero(d);
     size_t i = 0;
-    for (; i + lanes <= padded_dim; i += lanes) {
-        float selector[hn::MaxLanes(d)];
-        for (size_t lane = 0; lane < lanes; ++lane) {
-            selector[lane] = bit_at(i + lane) ? 1.0F : 0.0F;
+
+    if (lanes != 0 && lanes <= 64 && 64 % lanes == 0) {
+        const auto lane_idx = hn::Iota(du, 0);
+        const auto shift_amounts =
+            hn::Sub(hn::Set(du, static_cast<uint32_t>(lanes - 1)), lane_idx);
+        const auto one = hn::Set(du, 1U);
+        const uint64_t chunk_mask =
+            (lanes == 64) ? ~uint64_t{0} : ((uint64_t{1} << lanes) - 1);
+
+        for (; i + lanes <= padded_dim; i += lanes) {
+            uint64_t word = 0;
+            std::memcpy(&word, data + (i / 64) * 8, sizeof(word));
+            const size_t hi_bit = 63 - (i % 64);
+            const uint64_t chunk = (word >> (hi_bit - lanes + 1)) & chunk_mask;
+            const auto broadcast = hn::Set(du, static_cast<uint32_t>(chunk));
+            const auto extracted = hn::And(hn::operator>>(broadcast, shift_amounts), one);
+            const auto mask = hn::RebindMask(d, hn::Ne(extracted, hn::Zero(du)));
+            sum = hn::Add(sum, hn::IfThenElseZero(mask, hn::LoadU(d, query + i)));
         }
-        sum = hn::MulAdd(hn::LoadU(d, query + i), hn::LoadU(d, selector), sum);
     }
+
     float result = hn::ReduceSum(d, sum);
     for (; i < padded_dim; ++i) {
         if (bit_at(i)) {
