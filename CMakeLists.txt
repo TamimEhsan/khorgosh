@@ -102,6 +102,7 @@ set(RABITQ_COMMON_SOURCES
 # highway-plan.md Phase 2.
 set(RABITQ_HIGHWAY_SOURCES
     src/simd/space_highway.cpp
+    src/simd/rotator_highway.cpp
 )
 
 include(highway)

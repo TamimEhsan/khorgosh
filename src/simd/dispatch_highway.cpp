@@ -163,14 +163,7 @@ void fht_rotate(
     float fac,
     const uint8_t* flip
 ) {
-    (void)data;
-    (void)rotated_vec;
-    (void)dim;
-    (void)padded_dim;
-    (void)trunc_dim;
-    (void)fac;
-    (void)flip;
-    missing_feature("FHT rotation");
+    fht_rotate_highway(data, rotated_vec, dim, padded_dim, trunc_dim, fac, flip);
 }
 
 static float missing_excode_ip(const float*, const uint8_t*, size_t) {
@@ -192,17 +185,10 @@ ExcodeIpTable resolve_excode_ip_table() {
 }
 
 void flip_sign(const uint8_t* flip, float* data, size_t dim) {
-    (void)flip;
-    (void)data;
-    (void)dim;
-    missing_feature("sign flip");
+    flip_sign_highway(flip, data, dim);
 }
 
-void kacs_walk(float* data, size_t len) {
-    (void)data;
-    (void)len;
-    missing_feature("FhtKacRotator");
-}
+void kacs_walk(float* data, size_t len) { kacs_walk_highway(data, len); }
 
 void scalar_quantize_uint8(
     uint8_t* result, const float* vec0, size_t dim, float lo, float delta

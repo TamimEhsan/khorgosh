@@ -111,7 +111,7 @@ uint8_t bitreverse8(uint8_t x) {
     x = (((x & 0x0F) << 4) | ((x & 0xF0) >> 4));
     return x;
 }
-TEST(FlipSignTest, FlipWorks) {
+void check_flip_sign(void (*flip_sign_fn)(const uint8_t*, float*, size_t)) {
     const size_t dim = 128;
     float data[dim];
     uint8_t flip[dim / 8];  // 1 bit per float
@@ -125,7 +125,7 @@ TEST(FlipSignTest, FlipWorks) {
     }
 
     // Perform sign flipping
-    rabitqlib::rotator_impl::flip_sign(flip, data, dim);
+    flip_sign_fn(flip, data, dim);
 
     // Output the results
     uint8_t signs = 0;
@@ -142,16 +142,55 @@ TEST(FlipSignTest, FlipWorks) {
     }
 }
 
+TEST(FlipSignTest, FlipWorks) { check_flip_sign(rabitqlib::rotator_impl::flip_sign); }
+
+// Compiled unconditionally on every architecture (see
+// docs/portability/highway-plan.md), so tested unconditionally too, unlike
+// the capability-guarded avx2/avx512 entry points.
+TEST(FlipSignTest, HighwayBackendFlipWorks) { check_flip_sign(simd::flip_sign_highway); }
+
+TEST(KacsWalkTest, BackendsMatchScalarReference) {
+    std::vector<decltype(&simd::kacs_walk)> backends{simd::kacs_walk_highway};
+    if (cpu::has_avx2()) {
+        backends.push_back(simd::kacs_walk_avx2);
+    }
+    if (cpu::has_avx512_core()) {
+        backends.push_back(simd::kacs_walk_avx512);
+    }
+    for (size_t len : {64U, 128U, 256U, 4096U, 65536U}) {
+        SCOPED_TRACE(len);
+        std::vector<float> expected(len);
+        for (size_t i = 0; i < len; ++i) {
+            expected[i] = std::sin(static_cast<float>(i) * 0.31F);
+        }
+        for (size_t i = 0; i < len / 2; ++i) {
+            const float a = expected[i], b = expected[i + len / 2];
+            expected[i] = a + b;
+            expected[i + len / 2] = a - b;
+        }
+        for (auto backend : backends) {
+            std::vector<float> actual(len);
+            for (size_t i = 0; i < len; ++i) {
+                actual[i] = std::sin(static_cast<float>(i) * 0.31F);
+            }
+            backend(actual.data(), len);
+            for (size_t i = 0; i < len; ++i) {
+                EXPECT_FLOAT_EQ(actual[i], expected[i]);
+            }
+        }
+    }
+}
+
 TEST(FhtDispatchTest, BackendsMatchScalarButterfliesAndPadding) {
-    std::vector<decltype(&simd::fht_rotate)> backends;
+    // Compiled unconditionally on every architecture (see
+    // docs/portability/highway-plan.md), so tested unconditionally too,
+    // unlike the capability-guarded avx2/avx512 entries below.
+    std::vector<decltype(&simd::fht_rotate)> backends{simd::fht_rotate_highway};
     if (cpu::has_avx2()) {
         backends.push_back(simd::fht_rotate_avx2);
     }
     if (cpu::has_avx512_core()) {
         backends.push_back(simd::fht_rotate_avx512);
-    }
-    if (backends.empty()) {
-        GTEST_SKIP() << "FHT rotation requires AVX2/FMA or AVX512";
     }
     backends.push_back(simd::fht_rotate);
     for (size_t dim :
@@ -221,15 +260,12 @@ TEST(FhtDispatchTest, BackendsMatchScalarButterfliesAndPadding) {
 }
 
 TEST(FhtDispatchTest, PreservesZeroNormAndInnerProduct) {
-    std::vector<decltype(&simd::fht_rotate)> backends;
+    std::vector<decltype(&simd::fht_rotate)> backends{simd::fht_rotate_highway};
     if (cpu::has_avx2()) {
         backends.push_back(simd::fht_rotate_avx2);
     }
     if (cpu::has_avx512_core()) {
         backends.push_back(simd::fht_rotate_avx512);
-    }
-    if (backends.empty()) {
-        GTEST_SKIP() << "FHT rotation requires AVX2/FMA or AVX512";
     }
     for (size_t dim : {64U, 65U, 128U, 192U, 256U, 512U, 4097U, 65536U}) {
         SCOPED_TRACE(dim);
