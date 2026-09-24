@@ -203,35 +203,28 @@ void scalar_quantize_uint16(
     scalar_quantize_uint16_highway(result, vec0, dim, lo, delta);
 }
 
-static void missing_pack_excode(const uint8_t* o_raw, uint8_t* o_compact, size_t dim) {
-    (void)o_raw;
-    (void)o_compact;
-    (void)dim;
-    missing_feature("excode packing");
-}
-
 void packing_2bit_excode(const uint8_t* o_raw, uint8_t* o_compact, size_t dim) {
-    missing_pack_excode(o_raw, o_compact, dim);
+    packing_2bit_excode_highway(o_raw, o_compact, dim);
 }
 
 void packing_3bit_excode(const uint8_t* o_raw, uint8_t* o_compact, size_t dim) {
-    missing_pack_excode(o_raw, o_compact, dim);
+    packing_3bit_excode_highway(o_raw, o_compact, dim);
 }
 
 void packing_4bit_excode(const uint8_t* o_raw, uint8_t* o_compact, size_t dim) {
-    missing_pack_excode(o_raw, o_compact, dim);
+    packing_4bit_excode_highway(o_raw, o_compact, dim);
 }
 
 void packing_5bit_excode(const uint8_t* o_raw, uint8_t* o_compact, size_t dim) {
-    missing_pack_excode(o_raw, o_compact, dim);
+    packing_5bit_excode_highway(o_raw, o_compact, dim);
 }
 
 void packing_6bit_excode(const uint8_t* o_raw, uint8_t* o_compact, size_t dim) {
-    missing_pack_excode(o_raw, o_compact, dim);
+    packing_6bit_excode_highway(o_raw, o_compact, dim);
 }
 
 void packing_7bit_excode(const uint8_t* o_raw, uint8_t* o_compact, size_t dim) {
-    missing_pack_excode(o_raw, o_compact, dim);
+    packing_7bit_excode_highway(o_raw, o_compact, dim);
 }
 
 }  // namespace rabitqlib::simd
