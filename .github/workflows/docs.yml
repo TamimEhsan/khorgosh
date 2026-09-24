@@ -23,6 +23,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: true
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -44,6 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          submodules: true
           fetch-depth: 0
       - uses: actions/setup-python@v7
         with:

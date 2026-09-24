@@ -107,7 +107,7 @@ On Ubuntu or Debian:
 ```bash
 sudo apt-get update
 sudo apt-get install -y build-essential cmake libomp-dev
-git clone https://github.com/VectorDB-NTU/RaBitQ-Library.git
+git clone --recurse-submodules https://github.com/VectorDB-NTU/RaBitQ-Library.git
 cd RaBitQ-Library
 python -m pip install .
 ```
@@ -229,7 +229,7 @@ and HNSW implementations, with links to the source code.
 Clone and build the library and example programs:
 
 ```bash
-git clone https://github.com/VectorDB-NTU/RaBitQ-Library.git
+git clone --recurse-submodules https://github.com/VectorDB-NTU/RaBitQ-Library.git
 cd RaBitQ-Library
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

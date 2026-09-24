@@ -1,0 +1,3 @@
+[submodule "include/rabitqlib/third/highway"]
+	path = include/rabitqlib/third/highway
+	url = https://github.com/google/highway.git

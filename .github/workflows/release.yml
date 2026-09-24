@@ -44,6 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          submodules: true
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
       - uses: actions/setup-python@v7
@@ -68,6 +69,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          submodules: true
           ref: ${{ needs.prepare.outputs.sha }}
 
       - uses: actions/setup-python@v7
@@ -107,6 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          submodules: true
           ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/setup-python@v7
         with:
@@ -142,6 +145,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          submodules: true
           ref: ${{ needs.prepare.outputs.sha }}
           fetch-depth: 0
       - name: Create tag at the tested commit
@@ -196,6 +200,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          submodules: true
           ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Download wheel artifacts

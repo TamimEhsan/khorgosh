@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(RaBitQLib VERSION 0.3.8 LANGUAGES CXX)
 
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
@@ -75,6 +77,8 @@ set(RABITQ_COMMON_SOURCES
     src/simd/matrix_generic.cpp
 )
 
+include(highway)
+
 set(RABITQ_AVX2_SOURCES)
 set(RABITQ_AVX512_SOURCES)
 set(RABITQ_AVX512_POPCNT_SOURCES)
@@ -138,13 +142,19 @@ add_library(rabitq_core STATIC
     ${RABITQ_HNSW_AVX2_SOURCES}
     ${RABITQ_HNSW_AVX512_CORE_SOURCES}
     ${RABITQ_HNSW_AVX512_POPCNT_SOURCES}
+    $<TARGET_OBJECTS:rabitqlib_highway>
 )
 
 target_include_directories(rabitq_core PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+# Highway's headers are a private implementation detail of rabitq_core (see
+# cmake/highway.cmake): PRIVATE here means consumers linking rabitqlib do not
+# also need hwy/highway.h on their include path.
+target_include_directories(rabitq_core PRIVATE "${RABITQLIB_HIGHWAY_INCLUDE_DIR}")
 target_link_libraries(rabitq_core PUBLIC rabitq_compile_options)
+target_link_libraries(rabitq_core PRIVATE ${ATOMICS_LIBRARIES})
 set_target_properties(rabitq_core PROPERTIES
     EXPORT_NAME core
     POSITION_INDEPENDENT_CODE ON
