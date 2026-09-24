@@ -158,6 +158,13 @@ TEST(FastScanPackingTest, AccumulatesReferenceLutValuesOnEverySupportedBackend) 
                 EXPECT_EQ(actual, expected);
                 EXPECT_EQ(actual_hacc, expected_hacc);
             };
+            // Portable (Highway) backend; compiled on every architecture, so
+            // tested unconditionally. See docs/portability/highway-plan.md.
+            check_backend(
+                simd::accumulate_highway,
+                simd::transfer_lut_hacc_highway,
+                simd::accumulate_hacc_highway
+            );
             if (cpu::has_avx2()) {
                 SCOPED_TRACE("AVX2");
                 check_backend(
@@ -208,6 +215,7 @@ TEST(FastScanPackingTest, AccumulatesLargeDimensionsWithoutLaneOverflow) {
             EXPECT_EQ(actual, expected);
         };
         check_backend(accumulate);
+        check_backend(simd::accumulate_highway);
         if (cpu::has_avx2()) {
             SCOPED_TRACE("AVX2");
             check_backend(simd::accumulate_avx2);
@@ -253,6 +261,7 @@ TEST(FastScanHighAccuracyTest, AccumulatesLargeDimensionsWithoutLaneOverflow) {
                 accumulate_fn(packed.data(), packed_lut.data(), actual.data(), dim);
                 EXPECT_EQ(actual, expected);
             };
+            check_backend(simd::transfer_lut_hacc_highway, simd::accumulate_hacc_highway);
             if (cpu::has_avx2()) {
                 SCOPED_TRACE("AVX2");
                 check_backend(simd::transfer_lut_hacc_avx2, simd::accumulate_hacc_avx2);
@@ -283,6 +292,7 @@ TEST(FastScanHighAccuracyTest, RejectsAccumulationsExceedingInt32Range) {
             return value == 42;
         }));
     };
+    check_backend(simd::transfer_lut_hacc_highway, simd::accumulate_hacc_highway);
     if (cpu::has_avx2()) {
         SCOPED_TRACE("AVX2");
         check_backend(simd::transfer_lut_hacc_avx2, simd::accumulate_hacc_avx2);

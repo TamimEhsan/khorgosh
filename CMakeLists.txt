@@ -101,6 +101,7 @@ set(RABITQ_COMMON_SOURCES
     # sources here rather than under the -march=x86-64 override those need.
     src/simd/warmup_highway.cpp
     src/simd/pack_excode_highway.cpp
+    src/simd/fastscan_highway.cpp
 )
 
 # Highway kernels compile on every architecture (that is the point of using

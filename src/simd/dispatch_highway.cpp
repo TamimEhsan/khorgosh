@@ -3,14 +3,11 @@
 // source list directly — doing so duplicate-defines every symbol below and
 // fails the link.
 //
-// Phase 1/2 (see docs/portability/highway-plan.md): every public entry
-// point dispatch_x86.cpp provides on x86 is mirrored here. Kernels that
-// have a real `*_highway` implementation call it directly (currently: raw
-// float space distances); kernels that only have a `*_generic` fallback so
-// far call that; kernels with neither yet (rotation, sign flip, quantize,
-// excode packing/transpose, FastScan accumulate, warmup, HNSW search) throw
-// a descriptive error, the same way dispatch_x86.cpp does today on x86
-// hardware without AVX2/AVX-512. Phase 2/3 upgrade these one at a time.
+// (see docs/portability/highway-plan.md): every public entry point
+// dispatch_x86.cpp provides on x86 is mirrored here. Kernels that have a
+// real `*_highway` implementation call it directly; the handful that are
+// already portable Eigen-backed code (matrix/estimator batch functions)
+// call their existing `*_generic` implementation instead of duplicating it.
 //
 // Unlike dispatch_x86.cpp, there is no runtime tiering (no resolve_kernel)
 // here: which implementation exists for a given function is a compile-time
@@ -24,7 +21,6 @@
 #include <cstdint>
 #include <queue>
 #include <stdexcept>
-#include <string>
 #include <utility>
 
 #include "rabitqlib/defines.hpp"
@@ -131,14 +127,6 @@ float dot_product_dis(const float* a, const float* b, size_t dim) {
 }
 
 float l2norm_sqr(const float* a, size_t dim) { return l2norm_sqr_highway(a, dim); }
-
-[[noreturn]] static void missing_feature(const char* feature_name) {
-    throw std::runtime_error(
-        std::string(feature_name) +
-        " is not yet implemented for the portable (non-x86) dispatch backend; "
-        "see docs/portability/highway-plan.md"
-    );
-}
 
 // With zero extra bits there is no extra code to contribute to the inner
 // product, so the ex_bits == 0 slot must be a constant-zero stub rather than
@@ -279,19 +267,6 @@ float excode_ipimpl::ip64_fxu7_avx(
     return kExcodeIpTable[7](query, compact_code, dim);
 }
 
-// Shared by this namespace and the rabitqlib::fastscan/rabitqlib::hnsw::detail
-// blocks below, which reopen rabitqlib's nested namespaces later in this
-// file and can therefore reach this via ordinary unqualified-name lookup;
-// callers there qualify it explicitly (rabitqlib::missing_feature) anyway,
-// to keep the dependency obvious regardless of declaration order.
-[[noreturn]] static void missing_feature(const char* feature_name) {
-    throw std::runtime_error(
-        std::string(feature_name) +
-        " is not yet implemented for the portable (non-x86) dispatch backend; "
-        "see docs/portability/highway-plan.md"
-    );
-}
-
 void new_transpose_bin(const uint16_t* q, uint64_t* tq, size_t padded_dim, size_t b_query) {
     simd::new_transpose_bin_highway(q, tq, padded_dim, b_query);
 }
@@ -328,10 +303,7 @@ void accumulate(
     if (dim == 0 || dim % 16 != 0) {
         throw std::invalid_argument("FastScan dimension must be a positive multiple of 16");
     }
-    (void)codes;
-    (void)lp_table;
-    (void)result;
-    rabitqlib::missing_feature("fastscan accumulate");
+    simd::accumulate_highway(codes, lp_table, result, dim);
 }
 
 void transfer_lut_hacc(const uint16_t* lut, size_t dim, uint8_t* hc_lut) {
@@ -340,9 +312,7 @@ void transfer_lut_hacc(const uint16_t* lut, size_t dim, uint8_t* hc_lut) {
             "high-accuracy FastScan dimension must be a positive multiple of 16"
         );
     }
-    (void)lut;
-    (void)hc_lut;
-    rabitqlib::missing_feature("fastscan high-accuracy LUT transfer");
+    simd::transfer_lut_hacc_highway(lut, dim, hc_lut);
 }
 
 void accumulate_hacc(
@@ -356,10 +326,7 @@ void accumulate_hacc(
             "high-accuracy FastScan dimension must be a positive multiple of 16"
         );
     }
-    (void)codes;
-    (void)hc_lut;
-    (void)accu_res;
-    rabitqlib::missing_feature("fastscan high-accuracy accumulate");
+    simd::accumulate_hacc_highway(codes, hc_lut, accu_res, dim);
 }
 
 }  // namespace rabitqlib::fastscan
