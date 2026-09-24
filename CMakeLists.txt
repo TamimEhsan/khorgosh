@@ -7,14 +7,34 @@ list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
-# AVX2/AVX-512 intrinsics are not expressible source code on a non-x86
-# compiler, so the source groups and flags that use them (below) can only be
-# compiled on x86 targets.
+# RABITQLIB_TARGET_X86 is a pure architecture fact: AVX2/AVX-512 intrinsics
+# are not expressible source code on a non-x86 compiler, so the AVX2/AVX-512
+# kernel source groups and flags (below) can only be compiled on x86 targets
+# regardless of which dispatch body is active. Several tests reference
+# _avx2/_avx512-suffixed functions directly (explicit-backend parity tests),
+# so these sources must keep compiling on real x86 hardware even when
+# RABITQ_FORCE_HIGHWAY_BACKEND is set.
+option(
+    RABITQ_FORCE_HIGHWAY_BACKEND
+    "Use the portable (Highway) dispatch backend even on x86, for testing"
+    OFF
+)
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" RABITQLIB_SYSTEM_PROCESSOR_LOWER)
 if(RABITQLIB_SYSTEM_PROCESSOR_LOWER MATCHES "^(x86_64|amd64|x86|i[3-6]86)$")
     set(RABITQLIB_TARGET_X86 ON)
 else()
     set(RABITQLIB_TARGET_X86 OFF)
+endif()
+
+# What dispatch.cpp's #if actually reads: whether to use the x86 dispatch
+# body. Distinct from RABITQLIB_TARGET_X86 above so that
+# RABITQ_FORCE_HIGHWAY_BACKEND can swap the *dispatch* body without also
+# excluding the AVX2/AVX-512 *kernel* sources those explicit-backend tests
+# need.
+if(RABITQLIB_TARGET_X86 AND NOT RABITQ_FORCE_HIGHWAY_BACKEND)
+    set(RABITQLIB_USE_X86_DISPATCH ON)
+else()
+    set(RABITQLIB_USE_X86_DISPATCH OFF)
 endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -125,14 +145,13 @@ if(RABITQLIB_TARGET_X86)
     set(RABITQ_HNSW_AVX512_POPCNT_SOURCES
         src/index/hnsw_search_avx512_popcnt.cpp
     )
-else()
-    message(FATAL_ERROR
-        "rabitqlib: unsupported target architecture '${CMAKE_SYSTEM_PROCESSOR}'. "
-        "Only x86_64/i386 are currently supported; portable (Highway-backed) "
-        "dispatch for other architectures is planned but not implemented yet "
-        "(see docs/portability/highway-plan.md)."
-    )
 endif()
+# When RABITQLIB_TARGET_X86 is OFF (a genuine non-x86 target, or
+# RABITQ_FORCE_HIGHWAY_BACKEND), the AVX2/AVX-512 source lists above stay
+# empty and dispatch.cpp's #include falls through to dispatch_highway.cpp
+# instead — see docs/portability/highway-plan.md. Kernels that don't have a
+# Highway implementation yet throw a descriptive error at call time rather
+# than failing to configure/build.
 
 add_library(rabitq_core STATIC
     ${RABITQ_COMMON_SOURCES}
@@ -163,12 +182,14 @@ rabitq_enable_warnings(rabitq_core)
 
 # src/simd/dispatch.cpp is an architecture-selected shell (see
 # docs/portability/highway-plan.md): it #includes dispatch_x86.cpp when
-# RABITQLIB_TARGET_X86 is set. Neither dispatch_x86.cpp nor (eventually)
-# dispatch_highway.cpp is ever added to a source list directly — only the
-# shell is a real translation unit; the bodies would duplicate-define every
-# dispatch symbol if compiled on their own.
+# RABITQLIB_TARGET_X86 (the compile definition; note this reads
+# RABITQLIB_USE_X86_DISPATCH, not the CMake variable of the same name — see
+# the comment above that variable) is set, else dispatch_highway.cpp.
+# Neither body is ever added to a source list directly — only the shell is
+# a real translation unit; the bodies would duplicate-define every dispatch
+# symbol if compiled on their own.
 target_compile_definitions(rabitq_core PRIVATE
-    RABITQLIB_TARGET_X86=$<BOOL:${RABITQLIB_TARGET_X86}>
+    RABITQLIB_TARGET_X86=$<BOOL:${RABITQLIB_USE_X86_DISPATCH}>
 )
 
 # RABITQ_AVX2_SOURCES etc. are already empty when RABITQLIB_TARGET_X86 is OFF
