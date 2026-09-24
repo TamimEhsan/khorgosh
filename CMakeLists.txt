@@ -95,6 +95,11 @@ set(RABITQ_COMMON_SOURCES
     src/simd/quantization_generic.cpp
     src/simd/estimator_generic.cpp
     src/simd/matrix_generic.cpp
+    # Compiled unconditionally like the Highway sources below (portable,
+    # architecture-independent), but contains no Highway/vector code (see
+    # its file comment), so it belongs with the -march=native-eligible
+    # sources here rather than under the -march=x86-64 override those need.
+    src/simd/warmup_highway.cpp
 )
 
 # Highway kernels compile on every architecture (that is the point of using

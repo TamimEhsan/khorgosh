@@ -41,4 +41,24 @@ float warmup_ip_x0_q_512_avx512(
     size_t b_query
 );
 
+// Portable (Highway) backend; compiled on every architecture. See
+// docs/portability/highway-plan.md.
+float warmup_ip_x0_q_512_highway(
+    const uint8_t* data,
+    const uint64_t* query,
+    float delta,
+    float vl,
+    size_t padded_dim,
+    size_t b_query
+);
+
+float warmup_ip_x0_q_512_highway(
+    const uint64_t* data,
+    const uint64_t* query,
+    float delta,
+    float vl,
+    size_t padded_dim,
+    size_t b_query
+);
+
 }  // namespace rabitqlib::simd

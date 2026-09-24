@@ -30,6 +30,7 @@
 #include "rabitqlib/defines.hpp"
 #include "rabitqlib/fastscan/fastscan.hpp"
 #include "rabitqlib/fastscan/highacc_fastscan.hpp"
+#include "rabitqlib/index/hnsw/hnsw.hpp"
 #include "rabitqlib/simd/dispatch.hpp"
 #include "rabitqlib/simd/estimator_dispatch.hpp"
 #include "rabitqlib/simd/fastscan_dispatch.hpp"
@@ -303,28 +304,17 @@ float excode_ipimpl::ip64_fxu7_avx(
 }
 
 void new_transpose_bin(const uint16_t* q, uint64_t* tq, size_t padded_dim, size_t b_query) {
-    (void)q;
-    (void)tq;
-    (void)padded_dim;
-    (void)b_query;
-    missing_feature("new transpose bin");
+    simd::new_transpose_bin_highway(q, tq, padded_dim, b_query);
 }
 
 void new_transpose_bin_512(
     const uint8_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
 ) {
-    (void)q;
-    (void)tq;
-    (void)padded_dim;
-    (void)b_query;
-    missing_feature("new_transpose_bin_512");
+    simd::new_transpose_bin_512_highway(q, tq, padded_dim, b_query);
 }
 
 float mask_ip_x0_q(const float* query, const uint8_t* data, size_t padded_dim) {
-    (void)query;
-    (void)data;
-    (void)padded_dim;
-    missing_feature("mask ip x0 q");
+    return simd::mask_ip_x0_q_highway(query, data, padded_dim);
 }
 
 float mask_ip_x0_q(const float* query, const uint64_t* data, size_t padded_dim) {
@@ -395,13 +385,7 @@ float warmup_ip_x0_q_512(
     size_t padded_dim,
     size_t b_query
 ) {
-    (void)data;
-    (void)query;
-    (void)delta;
-    (void)vl;
-    (void)padded_dim;
-    (void)b_query;
-    missing_feature("warmup_ip_x0_q_512");
+    return simd::warmup_ip_x0_q_512_highway(data, query, delta, vl, padded_dim, b_query);
 }
 
 float warmup_ip_x0_q_512(
@@ -421,13 +405,44 @@ float warmup_ip_x0_q_512(
 
 namespace rabitqlib::hnsw::detail {
 
+// The Kernel policy's two static methods are exactly what search_knn_direct
+// needs (see hnsw_search_avx2_kernels.hpp's HnswAvx2Kernel for the same
+// pattern) — both already exist as the uint64_t*-overloaded highway
+// backends, so this is a thin wrapper, not a new implementation.
+struct HnswHighwayKernel {
+    static inline float warmup_ip_x0_q_512(
+        const uint64_t* data,
+        const uint64_t* query,
+        float delta,
+        float vl,
+        size_t padded_dim,
+        size_t b_query
+    ) {
+        return simd::warmup_ip_x0_q_512_highway(
+            data, query, delta, vl, padded_dim, b_query
+        );
+    }
+
+    static inline float mask_ip_x0_q(
+        const float* query, const uint64_t* data, size_t padded_dim
+    ) {
+        return simd::mask_ip_x0_q_highway(query, data, padded_dim);
+    }
+};
+
+// search_knn_direct is private; only specific named friend functions may
+// call it (see the friend declarations in hnsw.hpp), matching
+// search_knn_avx2/search_knn_avx512_core/search_knn_avx512_popcnt exactly.
+std::priority_queue<std::pair<float, PID>> search_knn_highway(
+    HierarchicalNSW& index, const float* query, size_t topk
+) {
+    return index.search_knn_direct<HnswHighwayKernel>(query, topk);
+}
+
 std::priority_queue<std::pair<float, PID>> search_knn(
     HierarchicalNSW& index, const float* query, size_t topk
 ) {
-    (void)index;
-    (void)query;
-    (void)topk;
-    rabitqlib::missing_feature("HNSW search");
+    return search_knn_highway(index, query, topk);
 }
 
 }  // namespace rabitqlib::hnsw::detail

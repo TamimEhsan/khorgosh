@@ -65,6 +65,37 @@ TEST(MaskIpX0Q, SupportsUnalignedCodes) {
     EXPECT_FLOAT_EQ(mask_ip_x0_q(query.data(), codes, dim), expected);
 }
 
+// new_transpose_bin[_512]_highway have no caller elsewhere in the codebase
+// (see space_highway.cpp's file comment) and no existing dedicated test, so
+// this verifies the documented bit convention directly: plane bit_idx,
+// word i/64, bit (63 - i%64) equals bit bit_idx of q[i].
+TEST(NewTransposeBin, HighwayBackendsMatchDocumentedBitConvention) {
+    constexpr size_t dim = 192;
+    constexpr size_t b_query = 5;
+    std::vector<uint8_t> q8(dim);
+    std::vector<uint16_t> q16(dim);
+    for (size_t i = 0; i < dim; ++i) {
+        q8[i] = static_cast<uint8_t>((i * 41 + 7) & ((1U << b_query) - 1));
+        q16[i] = q8[i];
+    }
+
+    std::vector<uint64_t> tq8((dim / 64) * b_query, 0xFFFFFFFFFFFFFFFFULL);
+    std::vector<uint64_t> tq16((dim / 64) * b_query, 0xFFFFFFFFFFFFFFFFULL);
+    simd::new_transpose_bin_512_highway(q8.data(), tq8.data(), dim, b_query);
+    simd::new_transpose_bin_highway(q16.data(), tq16.data(), dim, b_query);
+
+    const size_t num_words = dim / 64;
+    for (size_t i = 0; i < dim; ++i) {
+        for (size_t bit_idx = 0; bit_idx < b_query; ++bit_idx) {
+            const bool expected = ((q8[i] >> bit_idx) & 1U) != 0;
+            const uint64_t word8 = tq8[bit_idx * num_words + i / 64];
+            const uint64_t word16 = tq16[bit_idx * num_words + i / 64];
+            EXPECT_EQ(((word8 >> (63 - i % 64)) & 1U) != 0, expected);
+            EXPECT_EQ(((word16 >> (63 - i % 64)) & 1U) != 0, expected);
+        }
+    }
+}
+
 TEST(WarmupIpX0Q, SupportsUnalignedCodes) {
     constexpr float delta = 0.5F;
     constexpr float vl = -0.25F;
@@ -135,6 +166,59 @@ TEST(WarmupIpX0Q, SupportsUnalignedCodes) {
                     expected
                 );
             }
+        }
+    }
+}
+
+// new_transpose_bin_512_highway's output is transient (never persisted,
+// never compared cross-backend — see its file comment in space_highway.cpp),
+// so unlike the AVX2/AVX-512 case above, this validates the producer
+// (new_transpose_bin_512_highway) and consumer (warmup_ip_x0_q_512_highway)
+// together against an independent weighted-intersection reference, rather
+// than hand-constructing a query layout that assumes AVX2's specific
+// 512-block tiling.
+TEST(WarmupIpX0Q, HighwayBackendMatchesWeightedIntersection) {
+    constexpr float delta = 0.5F;
+    constexpr float vl = -0.25F;
+    for (size_t dim : {64UL, 128UL, 192UL, 448UL, 512UL, 576UL}) {
+        SCOPED_TRACE(dim);
+        std::vector<int> data_bits(dim);
+        size_t data_popcount = 0;
+        for (size_t i = 0; i < dim; ++i) {
+            data_bits[i] = (i % 3) == 0;
+            data_popcount += data_bits[i] != 0;
+        }
+
+        std::vector<uint8_t> storage((dim / 8) + 1);
+        auto* codes = storage.data() + 1;
+        ASSERT_NE(reinterpret_cast<uintptr_t>(codes) % alignof(uint64_t), 0U);
+        pack_binary_to_bytes<uint64_t>(data_bits.data(), codes, dim);
+
+        for (size_t b_query : {1UL, 4UL, 8UL}) {
+            SCOPED_TRACE(b_query);
+            std::vector<uint8_t> query_values(dim);
+            size_t weighted_intersection = 0;
+            for (size_t i = 0; i < dim; ++i) {
+                query_values[i] =
+                    static_cast<uint8_t>((i * 37 + 11) & ((1U << b_query) - 1));
+                if (data_bits[i] != 0) {
+                    weighted_intersection += query_values[i];
+                }
+            }
+
+            std::vector<uint64_t> transposed((dim / 64) * b_query, 0);
+            simd::new_transpose_bin_512_highway(
+                query_values.data(), transposed.data(), dim, b_query
+            );
+
+            const float expected = delta * static_cast<float>(weighted_intersection) +
+                                   vl * static_cast<float>(data_popcount);
+            EXPECT_FLOAT_EQ(
+                simd::warmup_ip_x0_q_512_highway(
+                    codes, transposed.data(), delta, vl, dim, b_query
+                ),
+                expected
+            );
         }
     }
 }

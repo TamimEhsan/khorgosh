@@ -118,6 +118,14 @@ void scalar_quantize_uint16_avx512(
 
 // Portable (Highway) backend; compiled on every architecture. See
 // docs/portability/highway-plan.md.
+void new_transpose_bin_highway(
+    const uint16_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
+);
+void new_transpose_bin_512_highway(
+    const uint8_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
+);
+float mask_ip_x0_q_highway(const float* query, const uint8_t* data, size_t padded_dim);
+float mask_ip_x0_q_highway(const float* query, const uint64_t* data, size_t padded_dim);
 void scalar_quantize_uint8_highway(
     uint8_t* result, const float* vec0, size_t dim, float lo, float delta
 );

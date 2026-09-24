@@ -10,6 +10,8 @@
 #include <hwy/highway.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 
 #include "rabitqlib/simd/space_dispatch.hpp"
 
@@ -82,6 +84,45 @@ float L2NormSqrImpl(const float* a, size_t n) {
     return RawFloat<FloatOp::kSquaredNorm>(a, a, n);
 }
 
+// Sums query[i] for every dimension i whose bit is set in the packed code
+// `data`, matching mask_ip_x0_q_avx2's bit convention exactly: dimension i's
+// bit lives at position (63 - i % 64) of the 64-bit word at data[i/64] (MSB
+// of each word first), i.e. word = memcpy'd 8 bytes starting at
+// data + (i/64)*8, tested via (word >> (63 - i%64)) & 1. Verified against
+// MaskIpX0Q.Avx2PreservesEveryStoredBitPosition's bit-for-bit convention.
+// The per-lane bit test is scalar (this is not the hottest path relative to
+// the O(padded_dim) float accumulation it feeds); only the summation is
+// vectorized.
+float MaskIpX0QImpl(
+    const float* HWY_RESTRICT query, const uint8_t* HWY_RESTRICT data, size_t padded_dim
+) {
+    const hn::ScalableTag<float> d;
+    const size_t lanes = hn::Lanes(d);
+    auto sum = hn::Zero(d);
+
+    auto bit_at = [&](size_t pos) -> bool {
+        uint64_t word = 0;
+        std::memcpy(&word, data + (pos / 64) * 8, sizeof(word));
+        return ((word >> (63 - pos % 64)) & 1U) != 0;
+    };
+
+    size_t i = 0;
+    for (; i + lanes <= padded_dim; i += lanes) {
+        float selector[hn::MaxLanes(d)];
+        for (size_t lane = 0; lane < lanes; ++lane) {
+            selector[lane] = bit_at(i + lane) ? 1.0F : 0.0F;
+        }
+        sum = hn::MulAdd(hn::LoadU(d, query + i), hn::LoadU(d, selector), sum);
+    }
+    float result = hn::ReduceSum(d, sum);
+    for (; i < padded_dim; ++i) {
+        if (bit_at(i)) {
+            result += query[i];
+        }
+    }
+    return result;
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace rabitqlib::simd
 HWY_AFTER_NAMESPACE();
@@ -107,6 +148,58 @@ float dot_product_dis_highway(const float* a, const float* b, size_t dim) {
 
 float l2norm_sqr_highway(const float* a, size_t dim) {
     return HWY_DYNAMIC_DISPATCH(L2NormSqrImpl)(a, dim);
+}
+
+HWY_EXPORT(MaskIpX0QImpl);
+
+float mask_ip_x0_q_highway(const float* query, const uint8_t* data, size_t padded_dim) {
+    return HWY_DYNAMIC_DISPATCH(MaskIpX0QImpl)(query, data, padded_dim);
+}
+
+float mask_ip_x0_q_highway(const float* query, const uint64_t* data, size_t padded_dim) {
+    return mask_ip_x0_q_highway(query, reinterpret_cast<const uint8_t*>(data), padded_dim);
+}
+
+// Transposes per-dimension b_query-bit codes into b_query bit-plane arrays:
+// bit_idx's plane, word i/64, bit (63 - i%64) = bit bit_idx of q[i]. This
+// output is purely transient (never persisted, never compared across
+// backends — no existing test exercises new_transpose_bin[_512] directly),
+// consumed only by warmup_ip_x0_q_512_highway below, so the two only need to
+// agree with each other; they share this convention deliberately, matching
+// mask_ip_x0_q_highway's bit-position convention above for data[] read by
+// other kernels (word i/64, bit 63 - i%64). One-time per-query setup cost,
+// not the search hot path, so this is plain scalar.
+template <typename QCode>
+void TransposeBinGeneric(
+    const QCode* HWY_RESTRICT q,
+    uint64_t* HWY_RESTRICT tq,
+    size_t padded_dim,
+    size_t b_query
+) {
+    const size_t num_words = padded_dim / 64;
+    std::memset(tq, 0, sizeof(uint64_t) * num_words * b_query);
+    for (size_t i = 0; i < padded_dim; ++i) {
+        const QCode code = q[i];
+        const size_t word = i / 64;
+        const uint64_t bit_mask = uint64_t{1} << (63 - i % 64);
+        for (size_t bit_idx = 0; bit_idx < b_query; ++bit_idx) {
+            if ((code >> bit_idx) & 1U) {
+                tq[bit_idx * num_words + word] |= bit_mask;
+            }
+        }
+    }
+}
+
+void new_transpose_bin_highway(
+    const uint16_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
+) {
+    TransposeBinGeneric(q, tq, padded_dim, b_query);
+}
+
+void new_transpose_bin_512_highway(
+    const uint8_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
+) {
+    TransposeBinGeneric(q, tq, padded_dim, b_query);
 }
 
 }  // namespace rabitqlib::simd

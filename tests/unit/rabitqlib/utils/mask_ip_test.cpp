@@ -13,13 +13,16 @@
 
 TEST(MaskIpX0Q, BackendsMatchScalarAcrossBlocksAndAlignments) {
     using namespace rabitqlib;
-    if (!cpu::has_avx2()) {
-        GTEST_SKIP() << "Binary dot product tests require AVX2/FMA";
-    }
     using Function = float (*)(const float*, const uint8_t*, size_t);
+    // mask_ip_x0_q (the dispatched entry) and mask_ip_x0_q_highway are
+    // compiled/tested unconditionally, unlike the capability-guarded
+    // avx2/avx512 entries below.
     std::vector<Function> functions{
-        static_cast<Function>(simd::mask_ip_x0_q_avx2),
-        static_cast<Function>(mask_ip_x0_q)};
+        static_cast<Function>(mask_ip_x0_q),
+        static_cast<Function>(simd::mask_ip_x0_q_highway)};
+    if (cpu::has_avx2()) {
+        functions.push_back(static_cast<Function>(simd::mask_ip_x0_q_avx2));
+    }
     if (cpu::has_avx512_core()) {
         functions.push_back(static_cast<Function>(simd::mask_ip_x0_q_avx512));
     }
@@ -80,5 +83,20 @@ TEST(MaskIpX0Q, Avx2PreservesEveryStoredBitPosition) {
         std::vector<uint64_t> words(dim / 64, 0);
         words[bit / 64] = uint64_t{1} << (63 - bit % 64);
         EXPECT_EQ(simd::mask_ip_x0_q_avx2(query.data(), words.data(), dim), query[bit]);
+    }
+}
+
+TEST(MaskIpX0Q, HighwayBackendPreservesEveryStoredBitPosition) {
+    using namespace rabitqlib;
+    constexpr size_t dim = 192;
+    std::vector<float> query(dim);
+    for (size_t i = 0; i < dim; ++i) {
+        query[i] = static_cast<float>(i + 1);
+    }
+    for (size_t bit = 0; bit < dim; ++bit) {
+        SCOPED_TRACE(bit);
+        std::vector<uint64_t> words(dim / 64, 0);
+        words[bit / 64] = uint64_t{1} << (63 - bit % 64);
+        EXPECT_EQ(simd::mask_ip_x0_q_highway(query.data(), words.data(), dim), query[bit]);
     }
 }

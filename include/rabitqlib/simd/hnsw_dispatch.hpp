@@ -25,5 +25,11 @@ std::priority_queue<std::pair<float, PID>> search_knn_avx512_popcnt(
     HierarchicalNSW&, const float*, size_t
 );
 
+// Portable (Highway) backend; compiled on every architecture. See
+// docs/portability/highway-plan.md.
+std::priority_queue<std::pair<float, PID>> search_knn_highway(
+    HierarchicalNSW&, const float*, size_t
+);
+
 }  // namespace detail
 }  // namespace rabitqlib::hnsw

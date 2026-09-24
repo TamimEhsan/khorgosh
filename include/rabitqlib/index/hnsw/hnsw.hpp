@@ -133,6 +133,9 @@ class HierarchicalNSW {
     friend maxheap<std::pair<float, PID>> detail::search_knn_avx512_popcnt(
         HierarchicalNSW&, const float*, size_t
     );
+    friend maxheap<std::pair<float, PID>> detail::search_knn_highway(
+        HierarchicalNSW&, const float*, size_t
+    );
 
     static constexpr PID kMaxLabelOperationLock = 65536;
     size_t max_elements_{0};
