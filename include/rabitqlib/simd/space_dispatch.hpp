@@ -15,6 +15,13 @@ float dot_product_generic(const float* a, const float* b, size_t dim);
 float dot_product_dis_generic(const float* a, const float* b, size_t dim);
 float l2norm_sqr_generic(const float* a, size_t dim);
 
+// Portable (Highway) backend; compiled on every architecture. See
+// docs/portability/highway-plan.md.
+float euclidean_sqr_highway(const float* a, const float* b, size_t dim);
+float dot_product_highway(const float* a, const float* b, size_t dim);
+float dot_product_dis_highway(const float* a, const float* b, size_t dim);
+float l2norm_sqr_highway(const float* a, size_t dim);
+
 float euclidean_sqr_avx2(const float* a, const float* b, size_t dim);
 float dot_product_avx2(const float* a, const float* b, size_t dim);
 float dot_product_dis_avx2(const float* a, const float* b, size_t dim);

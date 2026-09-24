@@ -38,7 +38,15 @@ std::vector<Backend> backends() {
          simd::euclidean_sqr_generic,
          simd::dot_product_generic,
          simd::dot_product_dis_generic,
-         simd::l2norm_sqr_generic}};
+         simd::l2norm_sqr_generic},
+        // Compiled unconditionally on every architecture (see
+        // docs/portability/highway-plan.md), so tested unconditionally too,
+        // unlike the capability-guarded avx2/avx512 entries below.
+        {"highway",
+         simd::euclidean_sqr_highway,
+         simd::dot_product_highway,
+         simd::dot_product_dis_highway,
+         simd::l2norm_sqr_highway}};
     if (cpu::has_avx2()) {
         result.push_back(
             {"avx2",

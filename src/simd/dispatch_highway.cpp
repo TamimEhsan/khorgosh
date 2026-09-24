@@ -3,14 +3,14 @@
 // source list directly — doing so duplicate-defines every symbol below and
 // fails the link.
 //
-// Phase 1 skeleton (see docs/portability/highway-plan.md): every public
-// entry point dispatch_x86.cpp provides on x86 is mirrored here. Kernels
-// that already have a portable `*_generic` implementation call straight
-// through to it; kernels that don't yet (rotation, sign flip, quantize,
+// Phase 1/2 (see docs/portability/highway-plan.md): every public entry
+// point dispatch_x86.cpp provides on x86 is mirrored here. Kernels that
+// have a real `*_highway` implementation call it directly (currently: raw
+// float space distances); kernels that only have a `*_generic` fallback so
+// far call that; kernels with neither yet (rotation, sign flip, quantize,
 // excode packing/transpose, FastScan accumulate, warmup, HNSW search) throw
 // a descriptive error, the same way dispatch_x86.cpp does today on x86
-// hardware without AVX2/AVX-512. Phase 2/3 replace these bodies with real
-// Highway kernels one at a time.
+// hardware without AVX2/AVX-512. Phase 2/3 upgrade these one at a time.
 //
 // Unlike dispatch_x86.cpp, there is no runtime tiering (no resolve_kernel)
 // here: which implementation exists for a given function is a compile-time
@@ -118,18 +118,18 @@ void split_batch_estdist(
 }
 
 float euclidean_sqr(const float* a, const float* b, size_t dim) {
-    return euclidean_sqr_generic(a, b, dim);
+    return euclidean_sqr_highway(a, b, dim);
 }
 
 float dot_product(const float* a, const float* b, size_t dim) {
-    return dot_product_generic(a, b, dim);
+    return dot_product_highway(a, b, dim);
 }
 
 float dot_product_dis(const float* a, const float* b, size_t dim) {
-    return dot_product_dis_generic(a, b, dim);
+    return dot_product_dis_highway(a, b, dim);
 }
 
-float l2norm_sqr(const float* a, size_t dim) { return l2norm_sqr_generic(a, dim); }
+float l2norm_sqr(const float* a, size_t dim) { return l2norm_sqr_highway(a, dim); }
 
 [[noreturn]] static void missing_feature(const char* feature_name) {
     throw std::runtime_error(

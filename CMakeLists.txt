@@ -97,6 +97,13 @@ set(RABITQ_COMMON_SOURCES
     src/simd/matrix_generic.cpp
 )
 
+# Highway kernels compile on every architecture (that is the point of using
+# Highway), independent of RABITQLIB_TARGET_X86. See docs/portability/
+# highway-plan.md Phase 2.
+set(RABITQ_HIGHWAY_SOURCES
+    src/simd/space_highway.cpp
+)
+
 include(highway)
 
 set(RABITQ_AVX2_SOURCES)
@@ -155,6 +162,7 @@ endif()
 
 add_library(rabitq_core STATIC
     ${RABITQ_COMMON_SOURCES}
+    ${RABITQ_HIGHWAY_SOURCES}
     ${RABITQ_AVX2_SOURCES}
     ${RABITQ_AVX512_SOURCES}
     ${RABITQ_AVX512_POPCNT_SOURCES}
@@ -172,6 +180,11 @@ target_include_directories(rabitq_core PUBLIC
 # cmake/highway.cmake): PRIVATE here means consumers linking rabitqlib do not
 # also need hwy/highway.h on their include path.
 target_include_directories(rabitq_core PRIVATE "${RABITQLIB_HIGHWAY_INCLUDE_DIR}")
+# Highway's foreach_target.h re-includes each *_highway.cpp file by a path
+# resolved via the compiler's include search list, not relative to the
+# including file (see HWY_TARGET_INCLUDE in those files) — src/ must be on
+# that list for "simd/some_highway.cpp"-style paths to resolve.
+target_include_directories(rabitq_core PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(rabitq_core PUBLIC rabitq_compile_options)
 target_link_libraries(rabitq_core PRIVATE ${ATOMICS_LIBRARIES})
 set_target_properties(rabitq_core PROPERTIES
@@ -179,6 +192,22 @@ set_target_properties(rabitq_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 rabitq_enable_warnings(rabitq_core)
+
+# Counter rabitq_compile_options' -march=native (linked PUBLIC above) for
+# Highway sources specifically: per-source COMPILE_OPTIONS are appended after
+# the target's own, and -march is a single-value flag where the last
+# occurrence wins, so this resets Highway's baseline to portable x86-64
+# regardless of RABITQ_ENABLE_NATIVE_OPTIMIZATION. Highway's own
+# foreach_target.h multiversioning — not a blanket -march flag — is what is
+# supposed to pick the best ISA per translation unit at runtime; baking in
+# the build machine's ISA here would defeat that. TODO: needs an equivalent
+# baseline reset for non-x86 architectures once one is available to test
+# against (see docs/portability/highway-plan.md).
+if(RABITQLIB_TARGET_X86)
+    set_source_files_properties(${RABITQ_HIGHWAY_SOURCES} PROPERTIES
+        COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,Clang,GNU>:-march=x86-64>"
+    )
+endif()
 
 # src/simd/dispatch.cpp is an architecture-selected shell (see
 # docs/portability/highway-plan.md): it #includes dispatch_x86.cpp when
