@@ -99,7 +99,6 @@ set(RABITQ_COMMON_SOURCES
     # architecture-independent), but contains no Highway/vector code (see
     # its file comment), so it belongs with the -march=native-eligible
     # sources here rather than under the -march=x86-64 override those need.
-    src/simd/warmup_highway.cpp
     src/simd/pack_excode_highway.cpp
     src/simd/fastscan_highway.cpp
 )
@@ -112,6 +111,10 @@ set(RABITQ_HIGHWAY_SOURCES
     src/simd/rotator_highway.cpp
     src/simd/quantization_highway.cpp
     src/simd/space_excode_highway.cpp
+    # Uses hn::PopulationCount (foreach_target/HWY_DYNAMIC_DISPATCH), not
+    # plain scalar despite its earlier placement in RABITQ_COMMON_SOURCES —
+    # see the file's header comment for why that mattered.
+    src/simd/warmup_highway.cpp
 )
 
 include(highway)

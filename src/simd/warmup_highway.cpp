@@ -1,43 +1,125 @@
 // Portable (Highway) warmup/cold-start estimation kernel. See
 // docs/portability/highway-plan.md Phase 3.
 //
-// This is plain scalar, word-at-a-time popcount, not a Highway vector
-// kernel: modern hardware executes POPCNT on a 64-bit general-purpose
-// register in ~1-3 cycles (rabitqlib::bitops::popcount64 already wraps the
-// portable __builtin_popcountll/MSVC intrinsic), so there is no vector-width
-// dependent code here for Highway's foreach_target.h/HWY_DYNAMIC_DISPATCH
-// machinery to select between. The AVX2/AVX-512 kernels' vectorized
-// popcount lookup-table tricks exist only to work around AVX2 lacking a
-// vector POPCNT instruction (added only in AVX-512 VPOPCNTDQ); a portable
-// per-word scalar loop sidesteps that problem entirely.
+// warmup_ip_x0_q_512 is called once per visited HNSW candidate (the cheap
+// first-pass distance gate — see estimator.hpp's split_single_estdist_direct),
+// so it is a genuine search hot path, not a one-time setup cost. An earlier
+// version of this file was plain scalar, word-at-a-time popcount, reasoning
+// that hardware POPCNT needs no vector-width dispatch — true for the
+// instruction itself, but that reasoning missed that staying outside
+// Highway's foreach_target/HWY_DYNAMIC_DISPATCH machinery also means never
+// getting per-target compile flags: profiling a portable build
+// (RABITQ_ENABLE_NATIVE_OPTIMIZATION=OFF, matching AGENTS.md's requirement
+// for portable binaries/wheels) showed ~33% of total query time inside
+// __popcountdi2, GCC's software popcount fallback, because the file had no
+// -march flag at all and __builtin_popcountll therefore couldn't assume
+// hardware POPCNT was available. hn::PopulationCount fixes this properly:
+// on x86_256/x86_512 targets below AVX3_DL (i.e. without hardware
+// VPOPCNTDQ) it already uses the same vectorized nibble-shuffle-table
+// technique as warmup_avx2.cpp's hand-written popcount_avx2 (see
+// x86_256-inl.h/x86_512-inl.h), and native VPOPCNTDQ once available — so
+// this now gets genuine SIMD popcount on every target, not just "the
+// hardware instruction when the compiler happens to allow it".
+//
+// query layout matches new_transpose_bin_512_highway's documented
+// block/chunk convention exactly (see that function's comment in
+// space_highway.cpp) — this is warmup_ip_x0_q_512's public, cross-backend
+// contract (verified by WarmupIpX0Q.SupportsUnalignedCodes in
+// space_test.cpp), not a free internal choice.
+
+#undef HWY_TARGET_INCLUDE
+#define HWY_TARGET_INCLUDE "simd/warmup_highway.cpp"
+#include <hwy/foreach_target.h>
+#include <hwy/highway.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 
 #include "rabitqlib/simd/warmup_dispatch.hpp"
-#include "rabitqlib/utils/bitops.hpp"
 
+HWY_BEFORE_NAMESPACE();
+namespace rabitqlib::simd {
+namespace HWY_NAMESPACE {
+namespace hn = hwy::HWY_NAMESPACE;
+
+// Mirrors warmup_ip_x0_q_512_avx2's structure exactly: blocks of up to 8
+// 64-bit words (512 bits), one popcount accumulator per query bit-plane
+// (acc_bits[bit_idx]), shifted by bit_idx and summed only after the whole
+// buffer is processed (the shift is per bit-plane total, not per word).
+// b_query > kMaxQueryBits is rejected by the caller below, matching
+// warmup_ip_x0_q_512_avx2's own bound. Declared per-target (this namespace
+// is re-entered once per Highway target) rather than at file scope, since
+// the latter would redefine it on every foreach_target.h re-inclusion
+// within this one translation unit; the HWY_ONCE wrapper below uses its own
+// copy instead of reaching into a specific target's namespace for it.
+constexpr size_t kMaxQueryBits = 8;
+constexpr size_t kChunksPerBlock = 8;
+
+HWY_ATTR float WarmupIpX0Q512Impl(
+    const uint8_t* HWY_RESTRICT data,
+    const uint64_t* HWY_RESTRICT query,
+    float delta,
+    float vl,
+    size_t padded_dim,
+    size_t b_query
+) {
+    const hn::ScalableTag<uint64_t> d;
+    const size_t lanes = hn::Lanes(d);
+    const size_t num_words = padded_dim / 64;
+
+    auto acc_ppc = hn::Zero(d);
+    hn::Vec<decltype(d)> acc_bits[kMaxQueryBits];
+    for (size_t bit_idx = 0; bit_idx < b_query; ++bit_idx) {
+        acc_bits[bit_idx] = hn::Zero(d);
+    }
+
+    size_t word = 0;
+    size_t block_query_offset = 0;
+    while (word < num_words) {
+        const size_t chunks = std::min(kChunksPerBlock, num_words - word);
+        for (size_t c = 0; c < chunks; c += lanes) {
+            const size_t cnt = std::min(lanes, chunks - c);
+            const auto* data_ptr =
+                reinterpret_cast<const uint64_t*>(data + ((word + c) * 8));
+            const auto dv =
+                (cnt == lanes) ? hn::LoadU(d, data_ptr) : hn::LoadN(d, data_ptr, cnt);
+            acc_ppc = hn::Add(acc_ppc, hn::PopulationCount(dv));
+            for (size_t bit_idx = 0; bit_idx < b_query; ++bit_idx) {
+                const uint64_t* qptr = query + block_query_offset + (bit_idx * chunks) + c;
+                const auto qv =
+                    (cnt == lanes) ? hn::LoadU(d, qptr) : hn::LoadN(d, qptr, cnt);
+                acc_bits[bit_idx] =
+                    hn::Add(acc_bits[bit_idx], hn::PopulationCount(hn::And(dv, qv)));
+            }
+        }
+        word += chunks;
+        block_query_offset += chunks * b_query;
+    }
+
+    auto acc_ip = hn::Zero(d);
+    for (size_t bit_idx = 0; bit_idx < b_query; ++bit_idx) {
+        acc_ip = hn::Add(
+            acc_ip, hn::ShiftLeftSame(acc_bits[bit_idx], static_cast<int>(bit_idx))
+        );
+    }
+
+    const auto ip = static_cast<float>(hn::ReduceSum(d, acc_ip));
+    const auto ppc = static_cast<float>(hn::ReduceSum(d, acc_ppc));
+    return (delta * ip) + (vl * ppc);
+}
+
+}  // namespace HWY_NAMESPACE
+}  // namespace rabitqlib::simd
+HWY_AFTER_NAMESPACE();
+
+#if HWY_ONCE
 namespace rabitqlib::simd {
 
-// data: padded_dim/8 bytes, one bit per dimension (bin_code's existing,
-// shared packed-code format; see mask_ip_x0_q_highway's file comment for the
-// bit convention word/bit indexing shared across kernels reading bin_code).
-// query: new_transpose_bin_512_highway's output layout (see that function's
-// comment in space_highway.cpp for the full derivation) — blocks of up to 8
-// 64-wide chunks, block-major, bit-plane-major within each block. This is
-// the public warmup_ip_x0_q_512 contract (verified against
-// WarmupIpX0Q.SupportsUnalignedCodes in space_test.cpp, which hand-builds a
-// query array matching warmup_ip_x0_q_512_avx2's exact layout and calls the
-// dispatched entry point directly), not an internal, free-to-choose pairing.
-//
-// ip = sum_i data_bit[i] * query_value[i], where query_value[i] is the
-// b_query-bit integer reconstructed from its bit-planes, computed as
-// sum_bit_idx (popcount(data_word & plane_word) << bit_idx) accumulated
-// per word — the standard bit-sliced dot product technique. ppc is the
-// total population count of data, used for the delta/vl dequantization
-// below (matching warmup_ip_x0_q_512_avx2 exactly).
+HWY_EXPORT(WarmupIpX0Q512Impl);
+
 float warmup_ip_x0_q_512_highway(
     const uint8_t* data,
     const uint64_t* query,
@@ -46,28 +128,15 @@ float warmup_ip_x0_q_512_highway(
     size_t padded_dim,
     size_t b_query
 ) {
-    constexpr size_t kChunksPerBlock = 8;
-    const size_t num_words = padded_dim / 64;
-    uint64_t ppc = 0;
-    uint64_t ip = 0;
-    size_t word = 0;
-    size_t block_query_offset = 0;
-    while (word < num_words) {
-        const size_t chunks = std::min(kChunksPerBlock, num_words - word);
-        for (size_t chunk = 0; chunk < chunks; ++chunk, ++word) {
-            uint64_t data_word = 0;
-            std::memcpy(&data_word, data + word * 8, sizeof(data_word));
-            ppc += bitops::popcount64(data_word);
-            for (size_t bit_idx = 0; bit_idx < b_query; ++bit_idx) {
-                const uint64_t plane_word =
-                    query[block_query_offset + (bit_idx * chunks) + chunk];
-                ip += static_cast<uint64_t>(bitops::popcount64(data_word & plane_word))
-                      << bit_idx;
-            }
-        }
-        block_query_offset += chunks * b_query;
+    // Matches HWY_NAMESPACE::kMaxQueryBits above (and
+    // warmup_ip_x0_q_512_avx2's own bound); not reachable from here since
+    // that namespace is target-specific.
+    constexpr size_t kMaxQueryBits = 8;
+    if (b_query > kMaxQueryBits) {
+        throw std::invalid_argument("warmup_ip_x0_q_512 requires at most 8 query bits");
     }
-    return (delta * static_cast<float>(ip)) + (vl * static_cast<float>(ppc));
+    return HWY_DYNAMIC_DISPATCH(WarmupIpX0Q512Impl
+    )(data, query, delta, vl, padded_dim, b_query);
 }
 
 float warmup_ip_x0_q_512_highway(
@@ -84,3 +153,4 @@ float warmup_ip_x0_q_512_highway(
 }
 
 }  // namespace rabitqlib::simd
+#endif  // HWY_ONCE
