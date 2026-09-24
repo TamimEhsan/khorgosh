@@ -85,6 +85,19 @@ float L2NormSqrImpl(const float* a, size_t n) {
     return RawFloat<FloatOp::kSquaredNorm>(a, a, n);
 }
 
+// Standard SWAR bit reversal (matches rabitqlib::reverse_bits_u64 in
+// utils/space.hpp, duplicated locally rather than pulling in that header's
+// unrelated Eigen-based machinery for one six-line helper).
+inline uint64_t ReverseBits64(uint64_t n) {
+    n = ((n >> 1) & 0x5555555555555555ULL) | ((n << 1) & 0xaaaaaaaaaaaaaaaaULL);
+    n = ((n >> 2) & 0x3333333333333333ULL) | ((n << 2) & 0xccccccccccccccccULL);
+    n = ((n >> 4) & 0x0f0f0f0f0f0f0f0fULL) | ((n << 4) & 0xf0f0f0f0f0f0f0f0ULL);
+    n = ((n >> 8) & 0x00ff00ff00ff00ffULL) | ((n << 8) & 0xff00ff00ff00ff00ULL);
+    n = ((n >> 16) & 0x0000ffff0000ffffULL) | ((n << 16) & 0xffff0000ffff0000ULL);
+    n = ((n >> 32) & 0x00000000ffffffffULL) | ((n << 32) & 0xffffffff00000000ULL);
+    return n;
+}
+
 // Sums query[i] for every dimension i whose bit is set in the packed code
 // `data`, matching mask_ip_x0_q_avx2's bit convention exactly: dimension i's
 // bit lives at position (63 - i % 64) of the 64-bit word at data[i/64] (MSB
@@ -92,24 +105,26 @@ float L2NormSqrImpl(const float* a, size_t n) {
 // data + (i/64)*8, tested via (word >> (63 - i%64)) & 1. Verified against
 // MaskIpX0Q.Avx2PreservesEveryStoredBitPosition's bit-for-bit convention.
 //
-// This is a search hot path (called once per full-distance HNSW candidate;
-// profiling showed it dominating query time even after fixing
-// warmup_ip_x0_q_512_highway's popcount issue), so bit extraction is
-// vectorized too, not just the summation, mirroring mask_ip_x0_q_avx2's own
-// technique: broadcast a lanes-bit chunk of `data` to every lane, right-shift
-// each lane by a descending per-lane amount (lane 0 gets the chunk's
-// highest-order/first bit, i.e. dim i; lane lanes-1 gets its last) so bit 0
-// of each lane isolates that lane's target bit, then use it as a per-lane
-// select for query[i..i+lanes). Requires 64 % lanes == 0 so a lanes-wide
-// group never crosses a 64-bit word boundary; true for every realistic
-// (power-of-two, <= 64) Highway float lane count, but this falls back to
-// the scalar per-bit path instead of assuming it, since a wrong assumption
-// here would silently read the wrong bits rather than fail loudly.
+// This is a search hot path (called once per full-distance HNSW candidate).
+// An earlier version vectorized bit extraction via broadcast+variable-shift
+// (still correct, ~1.6x faster than the original scalar version), but
+// mask_ip_x0_q_avx512 is faster still: it reverses each 64-bit word ONCE
+// (turning the MSB-first storage into a plain LSB-first bitmask), then
+// reinterprets 16-bit slices of that reversed word directly as __mmask16
+// and uses _mm512_maskz_loadu_ps — a single native masked-load instruction,
+// with no broadcast/shift/compare needed at all. This mirrors that
+// technique with hn::LoadMaskBits (builds a mask directly from packed bits
+// — the portable equivalent of casting an integer to a mask register) and
+// hn::MaskedLoad (the portable equivalent of _mm512_maskz_loadu_ps), which
+// map to the same native instructions on HWY_TARGET <= HWY_AVX3. Processes
+// a full 64-bit word (padded_dim's rotation always pads to a multiple of
+// 64) per outer iteration, split into padded_dim/64/lanes lanes-wide groups
+// — same "64 % lanes == 0, else fall back to scalar" guard as before, for
+// the same reason.
 float MaskIpX0QImpl(
     const float* HWY_RESTRICT query, const uint8_t* HWY_RESTRICT data, size_t padded_dim
 ) {
     const hn::ScalableTag<float> d;
-    const hn::RebindToUnsigned<decltype(d)> du;
     const size_t lanes = hn::Lanes(d);
 
     auto bit_at = [&](size_t pos) -> bool {
@@ -122,22 +137,18 @@ float MaskIpX0QImpl(
     size_t i = 0;
 
     if (lanes != 0 && lanes <= 64 && 64 % lanes == 0) {
-        const auto lane_idx = hn::Iota(du, 0);
-        const auto shift_amounts =
-            hn::Sub(hn::Set(du, static_cast<uint32_t>(lanes - 1)), lane_idx);
-        const auto one = hn::Set(du, 1U);
-        const uint64_t chunk_mask =
-            (lanes == 64) ? ~uint64_t{0} : ((uint64_t{1} << lanes) - 1);
-
-        for (; i + lanes <= padded_dim; i += lanes) {
+        const size_t word_end = (padded_dim / 64) * 64;
+        for (; i < word_end; i += 64) {
             uint64_t word = 0;
             std::memcpy(&word, data + (i / 64) * 8, sizeof(word));
-            const size_t hi_bit = 63 - (i % 64);
-            const uint64_t chunk = (word >> (hi_bit - lanes + 1)) & chunk_mask;
-            const auto broadcast = hn::Set(du, static_cast<uint32_t>(chunk));
-            const auto extracted = hn::And(hn::operator>>(broadcast, shift_amounts), one);
-            const auto mask = hn::RebindMask(d, hn::Ne(extracted, hn::Zero(du)));
-            sum = hn::Add(sum, hn::IfThenElseZero(mask, hn::LoadU(d, query + i)));
+            const uint64_t reversed = ReverseBits64(word);
+            for (size_t g = 0; g < 64; g += lanes) {
+                const uint64_t group_bits = reversed >> g;
+                uint8_t bits_buf[8];
+                std::memcpy(bits_buf, &group_bits, sizeof(bits_buf));
+                const auto mask = hn::LoadMaskBits(d, bits_buf);
+                sum = hn::Add(sum, hn::MaskedLoad(mask, d, query + i + g));
+            }
         }
     }
 
