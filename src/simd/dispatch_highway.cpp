@@ -366,6 +366,15 @@ namespace rabitqlib::hnsw::detail {
 // pattern) — both already exist as the uint64_t*-overloaded highway
 // backends, so this is a thin wrapper, not a new implementation.
 struct HnswHighwayKernel {
+    // b_query is always SplitSingleQuery<float>::kNumBits (4) at this
+    // Kernel's one real call site (search_knn_direct, via
+    // split_single_estdist_direct<Kernel>) — HWY_DYNAMIC_DISPATCH can't
+    // benefit from that the way an inlined direct call could (see
+    // warmup_ip_x0_q_512_bits4_highway's comment in warmup_highway.cpp), so
+    // this checks for it explicitly and routes to a kernel with the bit
+    // count baked in at compile time instead. Any other b_query (a
+    // hypothetical future caller with a different Query type) falls back
+    // to the general path unchanged, so this can't silently miscompute.
     static inline float warmup_ip_x0_q_512(
         const uint64_t* data,
         const uint64_t* query,
@@ -374,6 +383,11 @@ struct HnswHighwayKernel {
         size_t padded_dim,
         size_t b_query
     ) {
+        if (b_query == 4) {
+            return simd::warmup_ip_x0_q_512_bits4_highway(
+                reinterpret_cast<const uint8_t*>(data), query, delta, vl, padded_dim
+            );
+        }
         return simd::warmup_ip_x0_q_512_highway(
             data, query, delta, vl, padded_dim, b_query
         );

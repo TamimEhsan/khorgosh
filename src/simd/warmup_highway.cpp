@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <utility>
 
 #include "rabitqlib/simd/warmup_dispatch.hpp"
 
@@ -111,6 +112,99 @@ HWY_ATTR float WarmupIpX0Q512Impl(
     return (delta * ip) + (vl * ppc);
 }
 
+// Specialized for a compile-time-known bit count: the fold expression below
+// unrolls every acc_bits[Bit] access to a constant index, so each stays in
+// a register instead of the compiler keeping the whole array on the stack.
+// See warmup_avx512.cpp's warmup_ip_x0_q_512_fixed for the AVX-512 analog
+// and its comment on the same underlying problem — but note the AVX-512
+// kernel used by HNSW (hnsw_warmup_ip_x0_q_512_avx512,
+// hnsw_search_avx512_kernels.hpp) gets this same benefit "for free": it's
+// an ordinary `static inline` function called from exactly one known call
+// site, so the compiler can inline it and constant-propagate that caller's
+// compile-time-constant b_query straight in. HWY_DYNAMIC_DISPATCH cannot
+// offer that: it resolves to whichever target implementation
+// hwy::GetChosenTarget() picks at process startup, a genuine runtime
+// indirect call, and a compiler can never propagate a caller's constant
+// argument through a call whose target isn't known until then — so the bit
+// count has to be baked in at the template level here instead of relying
+// on inlining.
+template <size_t... Bit>
+HWY_ATTR float WarmupIpX0Q512FixedImpl(
+    const uint8_t* HWY_RESTRICT data,
+    const uint64_t* HWY_RESTRICT query,
+    float delta,
+    float vl,
+    size_t padded_dim,
+    std::index_sequence<Bit...> /*bits*/
+) {
+    constexpr size_t kBits = sizeof...(Bit);
+    const hn::ScalableTag<uint64_t> d;
+    const size_t lanes = hn::Lanes(d);
+    const size_t num_words = padded_dim / 64;
+
+    auto acc_ppc = hn::Zero(d);
+    // +1 keeps the array well-formed for kBits == 0; only compile-time
+    // indices are used below, so each element stays in a register.
+    [[maybe_unused]] hn::Vec<decltype(d)> acc_bits[kBits + 1];
+    ((acc_bits[Bit] = hn::Zero(d)), ...);
+
+    size_t word = 0;
+    size_t block_query_offset = 0;
+    while (word < num_words) {
+        const size_t chunks = std::min(kChunksPerBlock, num_words - word);
+        for (size_t c = 0; c < chunks; c += lanes) {
+            const size_t cnt = std::min(lanes, chunks - c);
+            const auto* data_ptr =
+                reinterpret_cast<const uint64_t*>(data + ((word + c) * 8));
+            const auto dv =
+                (cnt == lanes) ? hn::LoadU(d, data_ptr) : hn::LoadN(d, data_ptr, cnt);
+            acc_ppc = hn::Add(acc_ppc, hn::PopulationCount(dv));
+            ((acc_bits[Bit] = hn::Add(
+                  acc_bits[Bit],
+                  hn::PopulationCount(hn::And(
+                      dv,
+                      (cnt == lanes)
+                          ? hn::LoadU(d, query + block_query_offset + (Bit * chunks) + c)
+                          : hn::LoadN(
+                                d, query + block_query_offset + (Bit * chunks) + c, cnt
+                            )
+                  ))
+              )),
+             ...);
+        }
+        word += chunks;
+        block_query_offset += chunks * kBits;
+    }
+
+    auto acc_ip = hn::Zero(d);
+    ((acc_ip = hn::Add(acc_ip, hn::ShiftLeftSame(acc_bits[Bit], static_cast<int>(Bit)))),
+     ...);
+
+    const auto ip = static_cast<float>(hn::ReduceSum(d, acc_ip));
+    const auto ppc = static_cast<float>(hn::ReduceSum(d, acc_ppc));
+    return (delta * ip) + (vl * ppc);
+}
+
+// Hardcoded to 4 bits: HnswHighwayKernel::warmup_ip_x0_q_512 (the only
+// caller) always receives SplitSingleQuery<float>::kNumBits, a fixed `= 4`
+// compile-time constant (include/rabitqlib/index/query.hpp) — not included
+// from here to avoid pulling the index layer into this simd kernel file.
+// dispatch_highway.cpp's caller checks the value still matches before
+// using this path and falls back to the general WarmupIpX0Q512Impl (any
+// bit count) otherwise, so a future mismatch degrades to losing this
+// optimization rather than producing a wrong answer.
+HWY_ATTR float WarmupIpX0Q512Bits4Impl(
+    const uint8_t* HWY_RESTRICT data,
+    const uint64_t* HWY_RESTRICT query,
+    float delta,
+    float vl,
+    size_t padded_dim
+) {
+    return WarmupIpX0Q512FixedImpl(
+        data, query, delta, vl, padded_dim, std::make_index_sequence<4>{}
+    );
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace rabitqlib::simd
 HWY_AFTER_NAMESPACE();
@@ -150,6 +244,19 @@ float warmup_ip_x0_q_512_highway(
     return warmup_ip_x0_q_512_highway(
         reinterpret_cast<const uint8_t*>(data), query, delta, vl, padded_dim, b_query
     );
+}
+
+HWY_EXPORT(WarmupIpX0Q512Bits4Impl);
+
+// HNSW-specific fast path; see WarmupIpX0Q512Bits4Impl's comment. Not part
+// of warmup_dispatch.hpp's general public surface — only
+// HnswHighwayKernel::warmup_ip_x0_q_512 (dispatch_highway.cpp) calls this,
+// after checking b_query == 4 itself.
+float warmup_ip_x0_q_512_bits4_highway(
+    const uint8_t* data, const uint64_t* query, float delta, float vl, size_t padded_dim
+) {
+    return HWY_DYNAMIC_DISPATCH(WarmupIpX0Q512Bits4Impl
+    )(data, query, delta, vl, padded_dim);
 }
 
 }  // namespace rabitqlib::simd
