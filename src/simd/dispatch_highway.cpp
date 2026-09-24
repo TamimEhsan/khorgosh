@@ -167,21 +167,17 @@ void fht_rotate(
     fht_rotate_highway(data, rotated_vec, dim, padded_dim, trunc_dim, fac, flip);
 }
 
-static float missing_excode_ip(const float*, const uint8_t*, size_t) {
-    missing_feature("excode ip functions");
-}
-
 ExcodeIpTable resolve_excode_ip_table() {
     return ExcodeIpTable{
         ip_fxu0,
-        missing_excode_ip,
-        missing_excode_ip,
-        missing_excode_ip,
-        missing_excode_ip,
-        missing_excode_ip,
-        missing_excode_ip,
-        missing_excode_ip,
-        missing_excode_ip,
+        excode_ipimpl::ip16_fxu1_highway,
+        excode_ipimpl::ip64_fxu2_highway,
+        excode_ipimpl::ip64_fxu3_highway,
+        excode_ipimpl::ip16_fxu4_highway,
+        excode_ipimpl::ip64_fxu5_highway,
+        excode_ipimpl::ip64_fxu6_highway,
+        excode_ipimpl::ip64_fxu7_highway,
+        excode_ipimpl::ip16_fxu8_highway,
     };
 }
 

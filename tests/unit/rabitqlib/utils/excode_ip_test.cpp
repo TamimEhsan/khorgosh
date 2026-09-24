@@ -35,6 +35,20 @@ TEST(ExcodeIp, BackendsMatchScalarAcrossWidthsAndBlockBoundaries) {
         simd::excode_ipimpl::ip64_fxu7_avx512,
         simd::excode_ipimpl::ip16_fxu8_avx512,
     };
+    // Portable (Highway) backend; compiled on every architecture (see
+    // docs/portability/highway-plan.md), so tested unconditionally too,
+    // regardless of which backend select_excode_ipfunc's dispatch resolves
+    // to on this machine.
+    const std::array<ex_ipfunc, 8> highway_functions{
+        simd::excode_ipimpl::ip16_fxu1_highway,
+        simd::excode_ipimpl::ip64_fxu2_highway,
+        simd::excode_ipimpl::ip64_fxu3_highway,
+        simd::excode_ipimpl::ip16_fxu4_highway,
+        simd::excode_ipimpl::ip64_fxu5_highway,
+        simd::excode_ipimpl::ip64_fxu6_highway,
+        simd::excode_ipimpl::ip64_fxu7_highway,
+        simd::excode_ipimpl::ip16_fxu8_highway,
+    };
     using PackFunction = void (*)(const uint8_t*, uint8_t*, size_t);
     const std::array<PackFunction, 6> avx2_pack_functions{
         simd::packing_2bit_excode_avx2,
@@ -130,6 +144,11 @@ TEST(ExcodeIp, BackendsMatchScalarAcrossWidthsAndBlockBoundaries) {
                             tolerance
                         );
                     }
+                    EXPECT_NEAR(
+                        highway_functions[bits - 1](query, compact, dim),
+                        expected,
+                        tolerance
+                    );
                     EXPECT_NEAR(
                         select_excode_ipfunc(bits)(query, compact, dim), expected, tolerance
                     );

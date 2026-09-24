@@ -110,6 +110,7 @@ set(RABITQ_HIGHWAY_SOURCES
     src/simd/space_highway.cpp
     src/simd/rotator_highway.cpp
     src/simd/quantization_highway.cpp
+    src/simd/space_excode_highway.cpp
 )
 
 include(highway)

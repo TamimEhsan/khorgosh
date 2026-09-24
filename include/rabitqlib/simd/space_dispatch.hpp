@@ -84,6 +84,33 @@ float ip16_fxu8_avx512(
     const float* __restrict__ query, const uint8_t* __restrict__ code, size_t dim
 );
 
+// Portable (Highway) backend; compiled on every architecture. See
+// docs/portability/highway-plan.md.
+float ip16_fxu1_highway(
+    const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
+);
+float ip64_fxu2_highway(
+    const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
+);
+float ip64_fxu3_highway(
+    const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
+);
+float ip16_fxu4_highway(
+    const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
+);
+float ip64_fxu5_highway(
+    const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
+);
+float ip64_fxu6_highway(
+    const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
+);
+float ip64_fxu7_highway(
+    const float* __restrict__ query, const uint8_t* __restrict__ compact_code, size_t dim
+);
+float ip16_fxu8_highway(
+    const float* __restrict__ query, const uint8_t* __restrict__ code, size_t dim
+);
+
 }  // namespace excode_ipimpl
 
 void new_transpose_bin_avx2(
