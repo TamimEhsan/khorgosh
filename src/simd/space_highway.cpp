@@ -9,6 +9,7 @@
 #include <hwy/foreach_target.h>
 #include <hwy/highway.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -160,17 +161,33 @@ float mask_ip_x0_q_highway(const float* query, const uint64_t* data, size_t padd
     return mask_ip_x0_q_highway(query, reinterpret_cast<const uint8_t*>(data), padded_dim);
 }
 
-// Transposes per-dimension b_query-bit codes into b_query bit-plane arrays:
-// bit_idx's plane, word i/64, bit (63 - i%64) = bit bit_idx of q[i]. This
-// output is purely transient (never persisted, never compared across
-// backends — no existing test exercises new_transpose_bin[_512] directly),
-// consumed only by warmup_ip_x0_q_512_highway below, so the two only need to
-// agree with each other; they share this convention deliberately, matching
-// mask_ip_x0_q_highway's bit-position convention above for data[] read by
-// other kernels (word i/64, bit 63 - i%64). One-time per-query setup cost,
-// not the search hot path, so this is plain scalar.
-template <typename QCode>
-void TransposeBinGeneric(
+// Transposes per-dimension b_query-bit codes into b_query bit-plane arrays,
+// grouped into blocks of up to kChunksPerBlock 64-wide chunks: within block
+// b (chunks c_0 .. c_n-1, global word index `word = block_first_word +
+// chunk`), bit_idx's plane for that block starts at
+// tq[block_tq_offset + bit_idx * n], and word `chunk`'s bit (63 - d) = bit
+// bit_idx of q[word * 64 + d]. Blocks are concatenated block-major
+// (block_tq_offset accumulates n * b_query per block).
+//
+// This is NOT a free internal choice: new_transpose_bin_512's output is
+// read by the public warmup_ip_x0_q_512 entry point, which
+// WarmupIpX0Q.SupportsUnalignedCodes (space_test.cpp) exercises against a
+// query array hand-built to match new_transpose_bin_512_avx2's exact
+// layout, independent of which backend the public entry point dispatches
+// to. kChunksPerBlock=8 (block size 512) reproduces that AVX2 kernel's
+// blocking (derived from new_transpose_bin_512_avx2's movemask/
+// reverse_bits_u64 sequence: block_tq_offset advances by
+// num_chunks_in_block * b_query, matching the test's `query_offset +=
+// chunks * b_query`). kChunksPerBlock=1 reproduces new_transpose_bin_avx2's
+// per-64-chunk layout (block size 64 degenerates every block to exactly one
+// chunk, i.e. plain chunk-major with no larger blocking) — new_transpose_
+// bin_highway has no caller elsewhere in the codebase and no dedicated
+// cross-backend test, but this keeps it consistent with its own AVX2
+// counterpart's documented behavior rather than an arbitrary convention.
+// One-time per-query setup cost, not the search hot path, so this is plain
+// scalar.
+template <typename QCode, size_t kChunksPerBlock>
+void TransposeBinBlocked(
     const QCode* HWY_RESTRICT q,
     uint64_t* HWY_RESTRICT tq,
     size_t padded_dim,
@@ -178,28 +195,35 @@ void TransposeBinGeneric(
 ) {
     const size_t num_words = padded_dim / 64;
     std::memset(tq, 0, sizeof(uint64_t) * num_words * b_query);
-    for (size_t i = 0; i < padded_dim; ++i) {
-        const QCode code = q[i];
-        const size_t word = i / 64;
-        const uint64_t bit_mask = uint64_t{1} << (63 - i % 64);
-        for (size_t bit_idx = 0; bit_idx < b_query; ++bit_idx) {
-            if ((code >> bit_idx) & 1U) {
-                tq[bit_idx * num_words + word] |= bit_mask;
+    size_t word = 0;
+    size_t block_tq_offset = 0;
+    while (word < num_words) {
+        const size_t chunks = std::min(kChunksPerBlock, num_words - word);
+        for (size_t chunk = 0; chunk < chunks; ++chunk, ++word) {
+            for (size_t d = 0; d < 64; ++d) {
+                const QCode code = q[(word * 64) + d];
+                const uint64_t bit_mask = uint64_t{1} << (63 - d);
+                for (size_t bit_idx = 0; bit_idx < b_query; ++bit_idx) {
+                    if ((code >> bit_idx) & 1U) {
+                        tq[block_tq_offset + (bit_idx * chunks) + chunk] |= bit_mask;
+                    }
+                }
             }
         }
+        block_tq_offset += chunks * b_query;
     }
 }
 
 void new_transpose_bin_highway(
     const uint16_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
 ) {
-    TransposeBinGeneric(q, tq, padded_dim, b_query);
+    TransposeBinBlocked<uint16_t, 1>(q, tq, padded_dim, b_query);
 }
 
 void new_transpose_bin_512_highway(
     const uint8_t* q, uint64_t* tq, size_t padded_dim, size_t b_query
 ) {
-    TransposeBinGeneric(q, tq, padded_dim, b_query);
+    TransposeBinBlocked<uint8_t, 8>(q, tq, padded_dim, b_query);
 }
 
 }  // namespace rabitqlib::simd

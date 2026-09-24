@@ -44,7 +44,7 @@ void accumulate_generic(
             totals[kPerm0[j]] +=
                 lookup(group_even, byte_j & 0xFU) + lookup(group_odd, byte_j16 & 0xFU);
             totals[kPerm0[j] + 16] += lookup(group_even, (byte_j >> 4) & 0xFU) +
-                                       lookup(group_odd, (byte_j16 >> 4) & 0xFU);
+                                      lookup(group_odd, (byte_j16 >> 4) & 0xFU);
         }
     }
 }

@@ -65,12 +65,17 @@ TEST(MaskIpX0Q, SupportsUnalignedCodes) {
     EXPECT_FLOAT_EQ(mask_ip_x0_q(query.data(), codes, dim), expected);
 }
 
-// new_transpose_bin[_512]_highway have no caller elsewhere in the codebase
-// (see space_highway.cpp's file comment) and no existing dedicated test, so
-// this verifies the documented bit convention directly: plane bit_idx,
-// word i/64, bit (63 - i%64) equals bit bit_idx of q[i].
+// new_transpose_bin_512_highway's layout is not a free internal choice —
+// see its file comment in space_highway.cpp: it must match
+// new_transpose_bin_512_avx2's block-of-8-chunks-then-bit-plane layout,
+// since warmup_ip_x0_q_512 (WarmupIpX0Q.SupportsUnalignedCodes) exercises
+// it via a query array built to that exact convention, independent of
+// dispatch backend. new_transpose_bin_highway (block size 1, i.e. plain
+// chunk-major) similarly matches new_transpose_bin_avx2's layout, though it
+// has no caller/cross-backend test of its own. dim=576 (> 512) exercises
+// the multi-block case for the _512 variant that a smaller dim would miss.
 TEST(NewTransposeBin, HighwayBackendsMatchDocumentedBitConvention) {
-    constexpr size_t dim = 192;
+    constexpr size_t dim = 576;
     constexpr size_t b_query = 5;
     std::vector<uint8_t> q8(dim);
     std::vector<uint16_t> q16(dim);
@@ -79,21 +84,32 @@ TEST(NewTransposeBin, HighwayBackendsMatchDocumentedBitConvention) {
         q16[i] = q8[i];
     }
 
-    std::vector<uint64_t> tq8((dim / 64) * b_query, 0xFFFFFFFFFFFFFFFFULL);
-    std::vector<uint64_t> tq16((dim / 64) * b_query, 0xFFFFFFFFFFFFFFFFULL);
+    const size_t num_words = dim / 64;
+    std::vector<uint64_t> tq8(num_words * b_query, 0xFFFFFFFFFFFFFFFFULL);
+    std::vector<uint64_t> tq16(num_words * b_query, 0xFFFFFFFFFFFFFFFFULL);
     simd::new_transpose_bin_512_highway(q8.data(), tq8.data(), dim, b_query);
     simd::new_transpose_bin_highway(q16.data(), tq16.data(), dim, b_query);
 
-    const size_t num_words = dim / 64;
-    for (size_t i = 0; i < dim; ++i) {
-        for (size_t bit_idx = 0; bit_idx < b_query; ++bit_idx) {
-            const bool expected = ((q8[i] >> bit_idx) & 1U) != 0;
-            const uint64_t word8 = tq8[bit_idx * num_words + i / 64];
-            const uint64_t word16 = tq16[bit_idx * num_words + i / 64];
-            EXPECT_EQ(((word8 >> (63 - i % 64)) & 1U) != 0, expected);
-            EXPECT_EQ(((word16 >> (63 - i % 64)) & 1U) != 0, expected);
+    auto check = [&](const std::vector<uint64_t>& tq, size_t chunks_per_block, auto& q) {
+        size_t word = 0;
+        size_t block_offset = 0;
+        while (word < num_words) {
+            const size_t chunks = std::min(chunks_per_block, num_words - word);
+            for (size_t chunk = 0; chunk < chunks; ++chunk, ++word) {
+                for (size_t d = 0; d < 64; ++d) {
+                    const size_t i = (word * 64) + d;
+                    for (size_t bit_idx = 0; bit_idx < b_query; ++bit_idx) {
+                        const bool expected = ((q[i] >> bit_idx) & 1U) != 0;
+                        const uint64_t w = tq[block_offset + (bit_idx * chunks) + chunk];
+                        EXPECT_EQ(((w >> (63 - d)) & 1U) != 0, expected);
+                    }
+                }
+            }
+            block_offset += chunks * b_query;
         }
-    }
+    };
+    check(tq8, 8, q8);
+    check(tq16, 1, q16);
 }
 
 TEST(WarmupIpX0Q, SupportsUnalignedCodes) {
@@ -170,13 +186,13 @@ TEST(WarmupIpX0Q, SupportsUnalignedCodes) {
     }
 }
 
-// new_transpose_bin_512_highway's output is transient (never persisted,
-// never compared cross-backend — see its file comment in space_highway.cpp),
-// so unlike the AVX2/AVX-512 case above, this validates the producer
-// (new_transpose_bin_512_highway) and consumer (warmup_ip_x0_q_512_highway)
-// together against an independent weighted-intersection reference, rather
-// than hand-constructing a query layout that assumes AVX2's specific
-// 512-block tiling.
+// Complements WarmupIpX0Q.SupportsUnalignedCodes below (which hand-builds a
+// query array matching the documented AVX2 layout): this instead validates
+// the producer (new_transpose_bin_512_highway) and consumer
+// (warmup_ip_x0_q_512_highway) together against an independent
+// weighted-intersection reference, so it stays a meaningful cross-check
+// even if the exact block layout in space_highway.cpp's file comment
+// changes.
 TEST(WarmupIpX0Q, HighwayBackendMatchesWeightedIntersection) {
     constexpr float delta = 0.5F;
     constexpr float vl = -0.25F;
