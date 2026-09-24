@@ -116,6 +116,15 @@ void scalar_quantize_uint16_avx512(
     uint16_t* result, const float* vec0, size_t dim, float lo, float delta
 );
 
+// Portable (Highway) backend; compiled on every architecture. See
+// docs/portability/highway-plan.md.
+void scalar_quantize_uint8_highway(
+    uint8_t* result, const float* vec0, size_t dim, float lo, float delta
+);
+void scalar_quantize_uint16_highway(
+    uint16_t* result, const float* vec0, size_t dim, float lo, float delta
+);
+
 void scalar_quantize_uint8(
     uint8_t* result, const float* vec0, size_t dim, float lo, float delta
 );

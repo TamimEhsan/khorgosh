@@ -289,6 +289,9 @@ TEST(ScalarQuantize, HalfValuesMatchScalarAcrossVectorBoundaries) {
     };
 
     check(simd::scalar_quantize_uint8, simd::scalar_quantize_uint16);
+    // Compiled unconditionally on every architecture (see
+    // docs/portability/highway-plan.md), so tested unconditionally too.
+    check(simd::scalar_quantize_uint8_highway, simd::scalar_quantize_uint16_highway);
     if (cpu::has_avx2()) {
         check(simd::scalar_quantize_uint8_avx2, simd::scalar_quantize_uint16_avx2);
     }

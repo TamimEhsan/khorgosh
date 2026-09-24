@@ -193,23 +193,13 @@ void kacs_walk(float* data, size_t len) { kacs_walk_highway(data, len); }
 void scalar_quantize_uint8(
     uint8_t* result, const float* vec0, size_t dim, float lo, float delta
 ) {
-    (void)result;
-    (void)vec0;
-    (void)dim;
-    (void)lo;
-    (void)delta;
-    missing_feature("uint8 quantize");
+    scalar_quantize_uint8_highway(result, vec0, dim, lo, delta);
 }
 
 void scalar_quantize_uint16(
     uint16_t* result, const float* vec0, size_t dim, float lo, float delta
 ) {
-    (void)result;
-    (void)vec0;
-    (void)dim;
-    (void)lo;
-    (void)delta;
-    missing_feature("uint16 quantize");
+    scalar_quantize_uint16_highway(result, vec0, dim, lo, delta);
 }
 
 static void missing_pack_excode(const uint8_t* o_raw, uint8_t* o_compact, size_t dim) {
